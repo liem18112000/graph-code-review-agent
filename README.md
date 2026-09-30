@@ -243,8 +243,20 @@ Working and measured end to end. Known gaps, stated plainly:
 
 - **The cheap-model tier is built but unexercised.** No bundle in testing has yet
   cleared the confidence floor for the `light` route.
-- **Benchmark numbers are not in yet.** The harness exists; the A/B against a
-  baseline reviewer has not been run.
+- **The benchmark runs, but the metric does not discriminate.** An A/B over 5
+  real fix commits (arm A: same model, no graph facts, free to search; arm B:
+  the full pipeline) scored **1.00 localization for both arms** at the default
+  ±5 tolerance. Cause: these diffs are 13–28 lines, and ±5 around each
+  ground-truth line covers essentially the whole diff, so any finding "hits".
+  At ±0 it discriminates but unfairly — a finding one line off a bug is still
+  correct — and there the baseline scores *better* (1.00/0.75 vs 0.75/0.46).
+  No tolerance is both fair and discriminating for diffs this small.
+
+  Fixing it needs one of: Defects4J's minimised bugs (a small bug inside a
+  large file), burying the bug-introducing hunk in a realistic multi-file PR so
+  localisation is non-trivial, or judging whether a finding *describes* the bug
+  rather than whether it lands near the right line. **Until then there is no
+  evidence this beats a baseline reviewer.**
 - Subscription auth does not travel to hosted CI runners. Works on a dev machine
   or a self-hosted runner where you are logged in.
 
