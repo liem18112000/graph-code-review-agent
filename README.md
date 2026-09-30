@@ -249,8 +249,12 @@ Working and measured end to end. Known gaps, stated plainly:
   ±5 tolerance. Cause: these diffs are 13–28 lines, and ±5 around each
   ground-truth line covers essentially the whole diff, so any finding "hits".
   At ±0 it discriminates but unfairly — a finding one line off a bug is still
-  correct — and there the baseline scores *better* (1.00/0.75 vs 0.75/0.46).
+  correct — and there the baseline scores *better* (1.00/0.82 vs 0.80/0.64).
   No tolerance is both fair and discriminating for diffs this small.
+
+  The one clear difference the run does show is **volume**: the graph arm
+  reported 9.4 findings per bug against the baseline's 4.4. Whether that is
+  better recall or more noise is exactly what this metric cannot tell you.
 
   Fixing it needs one of: Defects4J's minimised bugs (a small bug inside a
   large file), burying the bug-introducing hunk in a realistic multi-file PR so
