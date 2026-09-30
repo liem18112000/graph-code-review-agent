@@ -59,7 +59,9 @@ class Graph:
         self.fan_in: Counter = Counter()
         self.callees: dict[str, list[str]] = defaultdict(list)
         self.incoming: dict[str, list[str]] = defaultdict(list)
-        for e in raw["edges"]:
+        # clustered graphs key this "edges"; raw --no-cluster extractions use
+        # the D3-style "links". Accept either or the whole graph looks empty.
+        for e in (raw.get("edges") or raw.get("links") or []):
             if e.get("confidence") != "EXTRACTED":      # §9.4 found edges only
                 continue
             if e["relation"] == "calls":

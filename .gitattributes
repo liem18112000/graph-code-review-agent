@@ -1,0 +1,9 @@
+# Shell scripts MUST keep LF: a CRLF shebang fails on Linux/macOS with
+# "bad interpreter: /usr/bin/env sh^M: no such file or directory".
+*.sh   text eol=lf
+# Python is LF-safe everywhere; keep it deterministic across clones.
+*.py   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+# PowerShell is happiest with CRLF on Windows.
+*.ps1  text eol=crlf

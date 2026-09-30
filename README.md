@@ -22,14 +22,51 @@ four bundles, and only what survived reached the reasoning model.
 
 ## Requirements
 
+Two are **musts**, in this order:
+
 | | Why |
 |---|---|
-| **Claude Code** | Runs the reviewer on your **subscription** — no `ANTHROPIC_API_KEY` |
+| **1. `TYPESAFE_API_KEY`** in the environment | Tier-1 triage. The only API key this system uses. Without it `review.py` exits 2. |
+| **2. Claude Code**, logged in | Runs the reviewer on your **subscription** — no `ANTHROPIC_API_KEY` |
+
+Then the tooling:
+
+| | Why |
+|---|---|
 | **Python 3.11+** | `tomllib` is stdlib from 3.11 |
 | **`graphify`** on `PATH` | Builds the AST graph (local parse, no tokens) |
-| **`TYPESAFE_API_KEY`** in the environment | Tier-1 triage. The only API key this system uses. |
+| **`git`** | Diffs |
 
-Nothing else — no pip install, no virtualenv. The scripts are stdlib only.
+No pip install, no virtualenv — the scripts are stdlib only.
+
+### Check a machine before trusting it
+
+```bash
+sh ensure.sh            # macOS / Linux / Git Bash
+powershell -ExecutionPolicy Bypass -File ensure.ps1   # Windows
+```
+
+Both are thin bootstraps: they locate a Python ≥ 3.11 (printing the exact install
+command for your OS if there isn't one) and hand off to `ensure.py`, which checks
+everything else. **The shims exist because `ensure.py` cannot check whether Python
+is installed — it needs Python to run.**
+
+Output groups checks by priority and, on failure, tells you what to fix first:
+
+```
+MUST 1 -- TypeSafe API key
+  [  ok  ] TYPESAFE_API_KEY      107 chars, from environment
+MUST 2 -- Claude Code usable
+  [  ok  ] claude                2.1.221 (Claude Code)
+Required tooling
+  [  ok  ] python                3.12.1 (tomllib present)
+  ...
+READY.
+```
+
+Add `--deep` to prove the tier-1 endpoint answers and Claude auth works, rather
+than just checking the binaries exist. Exit code is 0 only when every required
+check passes, so it gates a provisioning script.
 
 ---
 
@@ -172,6 +209,20 @@ docs/               architecture.md (why) and call-flow.md (what calls what)
 
 `bench.py` prepares tasks and scores answers but never invokes a reviewer, so it
 stays neutral between arms:
+
+Against your own history — no download, and the arm that actually matters:
+
+```bash
+python bench.py prepare-git --repo /path/to/repo     --shas <fix-sha-1>,<fix-sha-2> --out tasks/
+python bench.py score --tasks-dir tasks/ --findings-dir out/graph/
+```
+
+`prepare-git` diffs each fix commit back to its parent, so the "PR" is the change
+that **re-introduces** the bug that commit fixed, and ground truth is what the fix
+touched. Build the graph at the fix commit — that is where the hook would have
+built it.
+
+Against Defects4J, which adds a triggering test as executable proof:
 
 ```bash
 bash setup-defects4j.sh                      # one-time, multi-GB

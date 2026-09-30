@@ -54,6 +54,30 @@ def prepare_bug(pid: str, bid: str, work: Path) -> dict:
                                      "-w", str(buggy)]).split()}
 
 
+def prepare_git(repo: Path, sha: str, work: Path) -> dict:
+    """Build a task from a real fix commit -- no Defects4J needed.
+
+    Same inversion as prepare_bug: diff the FIXED tree back to its parent, so the
+    'PR' is the change that introduces the bug the commit fixed. Ground truth is
+    what the fix touched. Weaker than Defects4J (no triggering test) but it runs
+    against your own history, which §10 calls the decisive arm.
+    """
+    g = lambda *a: _sh(["git", "-C", str(repo)] + list(a))
+    subject = g("log", "-1", "--format=%s", sha).strip()
+    # fix -> parent: applying this re-introduces the bug
+    diff = subprocess.run(["git", "-C", str(repo), "diff", f"{sha}..{sha}~1",
+                           "--", "*.java"], capture_output=True, text=True).stdout
+
+    truth: dict[str, list[int]] = {}
+    for h in parse_hunks(diff):
+        truth.setdefault(h.path, []).extend(h.touched)
+
+    return {"bug": sha[:9], "dataset": "git-history", "subject": subject,
+            "base_sha": sha, "head_sha": sha + "~1", "diff": diff,
+            "ground_truth": {k: sorted(set(v)) for k, v in truth.items()},
+            "triggering_tests": []}
+
+
 def score_one(task: dict, findings: list[dict], tol: int = 5) -> dict:
     """Rank matters: reviews are read top-down, so a hit under nine false
     positives is worth less. Path match is suffix-wise both ways -- generous,
@@ -100,6 +124,10 @@ def main() -> int:
     p.add_argument("--bugs", required=True, help="comma list, e.g. Lang:1,Math:5")
     p.add_argument("--out", type=Path, default=Path("tasks"))
     p.add_argument("--work", type=Path, default=Path(".d4j"))
+    q = sub.add_parser("prepare-git", help="tasks from real fix commits in a repo")
+    q.add_argument("--repo", type=Path, required=True)
+    q.add_argument("--shas", required=True, help="comma list of fix-commit SHAs")
+    q.add_argument("--out", type=Path, default=Path("tasks"))
     s = sub.add_parser("score")
     s.add_argument("--task", type=Path)
     s.add_argument("--findings", type=Path)
@@ -107,6 +135,18 @@ def main() -> int:
     s.add_argument("--findings-dir", type=Path)
     s.add_argument("--tolerance", type=int, default=5)
     a = ap.parse_args()
+
+    if a.cmd == "prepare-git":
+        a.out.mkdir(parents=True, exist_ok=True)
+        for sha in a.shas.split(","):
+            t = prepare_git(a.repo, sha.strip(), a.out)
+            if not t["ground_truth"]:
+                print(f"{sha}: no java hunks, skipped", file=sys.stderr)
+                continue
+            (a.out / f"{t['bug']}.json").write_text(json.dumps(t, indent=2),
+                                                    encoding="utf-8")
+            print(f"{t['bug']}  files={len(t['ground_truth'])}  {t['subject'][:58]}")
+        return 0
 
     if a.cmd == "prepare":
         a.out.mkdir(parents=True, exist_ok=True)

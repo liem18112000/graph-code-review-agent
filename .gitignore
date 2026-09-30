@@ -11,3 +11,7 @@ out/
 __pycache__/
 .venv/
 .idea/
+graphify-out/
+.d4j/
+tasks/
+out/
