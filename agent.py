@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""bundles.json -> findings.json. Exits 1 on blockers.
+
+    python agent.py --bundles bundles.json > findings.json
+
+Drives `claude -p`, so system 2 runs on the SUBSCRIPTION -- no ANTHROPIC_API_KEY
+(§4.1). One call per bundle, not an agent loop: review.py already gathered the
+facts (§1). Prompt and tools come from the graph-reviewer agent definition, so
+this and the interactive skill review identically (§10).
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import re
+from collections import Counter
+import shutil
+import sys
+from pathlib import Path
+
+AGENT = "graph-reviewer"
+
+# Routes that get the cheap tier (§4's model-tiering cost lever). Measured on
+# this account, `--model sonnet` resolves to a model it cannot access, so the
+# lever defaults off -- pass --cheap-model sonnet where it is available.
+CHEAP_ROUTES = {"light"}
+
+KEYS = ("id", "package", "sensitive", "facts", "hunks")
+
+
+def findings_from(stdout: str) -> list[dict]:
+    """Pull the findings array out of the agent's reply.
+
+    --output-format json wraps the reply; the reply itself is the JSON array the
+    agent definition asks for, sometimes inside a code fence.
+    """
+    text = json.loads(stdout).get("result", "")
+    if not isinstance(text, str):
+        return []
+    m = re.search(r"\[.*\]", text, re.S)          # tolerate prose or a fence
+    return json.loads(m.group(0)) if m else []
+
+
+async def review(bundle: dict, cwd: Path, timeout: int, cheap: str) -> list[dict]:
+    model = cheap if bundle.get("route") in CHEAP_ROUTES else "opus"
+    proc = await asyncio.create_subprocess_exec(
+        "claude", "-p", json.dumps({k: bundle[k] for k in KEYS}, indent=2),
+        "--agent", AGENT, "--model", model,
+        "--output-format", "json",
+        "--permission-mode", "dontAsk",           # non-interactive: never block
+        cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"timed out after {timeout}s")
+
+    # Claude Code reports failures as is_error in the JSON on STDOUT; stderr is
+    # usually empty, so reading stderr alone loses the actual message.
+    body = json.loads(out.decode() or "{}") if out else {}
+    if proc.returncode != 0 or body.get("is_error"):
+        msg = str(body.get("result") or err.decode(errors="replace")).strip()
+        raise RuntimeError(msg[:200] or f"exit {proc.returncode}")
+    u = body.get("usage") or {}
+    usage = {"model": next(iter(body.get("modelUsage") or {}), model),
+             "input_tokens": u.get("input_tokens", 0),
+             "output_tokens": u.get("output_tokens", 0),
+             "cache_read_input_tokens": u.get("cache_read_input_tokens", 0),
+             "cache_creation_input_tokens": u.get("cache_creation_input_tokens", 0),
+             # reported even on a subscription: NOTIONAL API-equivalent cost,
+             # not a bill. Useful only to compare arms in §10.
+             "notional_usd": body.get("total_cost_usd", 0.0),
+             "duration_ms": body.get("duration_ms", 0)}
+    return ([f | {"bundle": bundle["id"]} for f in findings_from(out.decode())],
+            usage)
+
+
+async def run(bundles: list[dict], cwd: Path, concurrency: int,
+              timeout: int, cheap: str) -> list[dict]:
+    sem = asyncio.Semaphore(concurrency)
+
+    async def one(b):
+        async with sem:
+            try:
+                return await review(b, cwd, timeout, cheap)
+            except Exception as e:                # one bundle must not sink the run
+                print(f"{b['id']}: {type(e).__name__}: {e}", file=sys.stderr)
+                return [], {}
+
+    pairs = await asyncio.gather(*map(one, bundles))
+    return ([f for g, _ in pairs for f in g], [u for _, u in pairs if u])
+
+
+def accounting(stats: dict, usage: list[dict]) -> dict:
+    """Token spend per system. Not comparable as money: system 1 is metered
+    API tokens; system 2 is the subscription, where notional_usd is an
+    API-equivalent figure, not a bill."""
+    tot = lambda k: sum(u[k] for u in usage)
+    return {"system1_jev": stats.get("system1_usage", {"calls": 0}),
+            "system2_claude": {
+                "calls": len(usage),
+                "models": Counter(u["model"] for u in usage),
+                "input_tokens": tot("input_tokens"),
+                "output_tokens": tot("output_tokens"),
+                "cache_read_tokens": tot("cache_read_input_tokens"),
+                "cache_write_tokens": tot("cache_creation_input_tokens"),
+                "notional_usd": round(tot("notional_usd"), 4),
+                "billed": "subscription -- notional_usd is not a bill",
+                "wall_ms": max((u["duration_ms"] for u in usage), default=0)}}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--bundles", default="-", help="review.py output; - for stdin")
+    ap.add_argument("--repo", type=Path, default=Path("."),
+                    help="working dir for the agent's Read tool")
+    ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--timeout", type=int, default=600, help="seconds per bundle")
+    ap.add_argument("--cheap-model", default="opus",
+                    help="model for low-risk bundles; 'sonnet' enables the "
+                         "tiering cost lever where the account has access")
+    a = ap.parse_args()
+
+    if not shutil.which("claude"):
+        print("claude not on PATH -- this agent runs on the Claude Code "
+              "subscription, not an API key", file=sys.stderr)
+        return 2
+
+    doc = json.loads(sys.stdin.read() if a.bundles == "-"
+                     else Path(a.bundles).read_text("utf-8"))
+    bundles = doc["bundles"]
+    findings, usage = asyncio.run(run(bundles, a.repo, a.concurrency,
+                                      a.timeout, a.cheap_model))
+
+    rank = {"blocker": 0, "should_fix": 1, "nitpick": 2}
+    findings.sort(key=lambda f: (rank.get(f.get("severity"), 3),
+                                 -f.get("confidence", 0)))
+    json.dump({"findings": findings}, sys.stdout, indent=2)
+    print()
+
+    acct = accounting(doc["stats"], usage)
+    print(json.dumps(acct, indent=2), file=sys.stderr)
+
+    blockers = sum(f.get("severity") == "blocker" for f in findings)
+    sensitive = sum(b.get("sensitive", False) for b in bundles)
+    print(f"{len(findings)} findings, {blockers} blockers, "
+          f"{sensitive} sensitive bundle(s) need a human", file=sys.stderr)
+    return 1 if blockers or sensitive else 0      # non-zero fails CI
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

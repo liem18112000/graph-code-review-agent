@@ -1,0 +1,13 @@
+# secrets -- TYPESAFE_API_KEY belongs in the environment, never in the repo
+.env
+*.key
+secrets.*
+
+# scratch
+.tmp/
+.d4j/
+tasks/
+out/
+__pycache__/
+.venv/
+.idea/

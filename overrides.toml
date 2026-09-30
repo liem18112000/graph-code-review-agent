@@ -1,0 +1,36 @@
+# Tier 0 -- deterministic, zero tokens (docs/architecture.md §4, §8).
+# Path globs only. No model runs to evaluate this file, which is exactly why
+# it is the cheapest and highest-value guardrail in the system.
+
+[sensitive]
+# Always the top model AND a required human, whatever any score says.
+# Err toward including a path: a false positive costs one review, a false
+# negative is an unreviewed auth change.
+globs = [
+  "**/auth/**", "**/security/**", "**/token/**", "**/credential*/**",
+  "**/*Auth*.java", "**/*Security*.java", "**/*Token*.java",
+  "**/*Permission*.java", "**/*Tenant*.java",
+  "**/migration/**", "**/migrations/**", "**/db/changelog/**",
+  "**/*Payment*.java", "**/*Invoice*.java", "**/*Billing*.java",
+  "**/*.sql",
+]
+
+[skip]
+# Resolved for free. Never reaches either model.
+globs = [
+  "**/*.lock", "**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml",
+  "**/target/**", "**/build/**", "**/dist/**", "**/out/**",
+  "**/node_modules/**", "**/.idea/**", "**/.venv/**",
+  "**/generated/**", "**/*_pb2.py", "**/*.min.js", "**/*.min.css",
+  "**/*.png", "**/*.jpg", "**/*.gif", "**/*.svg", "**/*.pdf",
+  # docs are not code; without this a DESIGN.md under a sensitive
+  # directory outranks every real code change in the diff
+  "**/*.md", "**/*.txt", "**/*.adoc",
+]
+
+[tests]
+# Not skipped -- used to answer "does anything cover this symbol?"
+globs = [
+  "**/src/test/**", "**/test/**", "**/tests/**",
+  "**/*Test.java", "**/*Tests.java", "**/*IT.java", "**/test_*.py",
+]

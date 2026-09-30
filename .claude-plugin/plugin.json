@@ -1,0 +1,12 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "graph-code-review-agent",
+  "version": "0.1.0",
+  "description": "Graph-grounded code review. Precomputes callers/callees/tests from an AST graph, triages each change with a fast classifier, and spends the reasoning model only where it is earned.",
+  "author": { "name": "liem18112000" },
+  "homepage": "https://github.com/liem18112000/graph-code-review-agent",
+  "repository": "https://github.com/liem18112000/graph-code-review-agent",
+  "license": "MIT",
+  "keywords": ["code-review", "code-graph", "graphify", "triage", "agent", "static-analysis"],
+  "skills": "./skills/"
+}
