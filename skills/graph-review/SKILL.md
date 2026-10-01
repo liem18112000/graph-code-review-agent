@@ -70,7 +70,17 @@ configured — that means the tiering lever did not fire and they ran at full co
 Bundles with `in_graph: false` still get reviewed — absence from the graph is not
 evidence of safety.
 
-## 4. Report
+## 4. Report what tier 1 decided
+
+Each finding carries a `verdict` — `block`, `fix` or `note` — chosen by tier 1,
+not by the reviewer and not by you. **Report that decision; do not re-litigate
+it.** You supplied the reasoning, system 1 made the call, and `verdict_by` says
+which: `system1`, or `fallback:…` when tier 1 was down or under-confident and
+the reviewer's own severity stood in.
+
+This is deliberate. A merge gate driven by whatever adjectives a reasoning model
+reached for drifts run to run; a cheap classifier over a fixed record does not.
+If you disagree with a verdict, say so in one line beside it and leave it alone.
 
 Findings arrive sorted: introduced before pre-existing, then by severity. Report:
 

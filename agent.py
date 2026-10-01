@@ -93,12 +93,52 @@ async def run(bundles: list[dict], cwd: Path, concurrency: int,
     return ([f for g, _ in pairs for f in g], [u for _, u in pairs if u])
 
 
-def accounting(stats: dict, usage: list[dict]) -> dict:
+# Reviewer severity -> verdict, used only when tier 1 is down or hedging.
+# Degrade, never downgrade: an unavailable adjudicator keeps system 2's call.
+#
+# Measured, so do not "fix" this by lowering the bar: tier 1 is confident
+# (0.82-1.00) on `note`, which follows from the supplied `scope` field, and
+# unconfident (0.27-0.72) on block-vs-fix, which needs production impact it
+# cannot see. Three framings were tried, including a block/pass binary that
+# was worse still. The split is real, so roughly a third of findings land
+# here -- that is the design working, not a tuning failure.
+FALLBACK = {"blocker": "block", "should_fix": "fix", "nitpick": "note"}
+
+
+def adjudicate(findings: list[dict], bundles: list[dict]) -> list[dict]:
+    """Tier 1 decides each finding's disposition; this just applies it.
+
+    The LLM reasons, system 1 chooses, and the exit code follows the choice --
+    so the merge gate stops drifting with how a reviewer worded `severity`.
+    """
+    import system1
+    sens = {b["id"]: b.get("sensitive", False) for b in bundles}
+    out = []
+    for f in findings:
+        v = system1.verdict(f, sens.get(f.get("bundle"), False))
+        ok = v.get("ok") and (v.get("confidence") or 0) >= 0.70
+        f["verdict"] = v["verdict"] if ok else FALLBACK.get(f.get("severity"), "fix")
+        f["verdict_by"] = "system1" if ok else "fallback:" + str(v.get("error", "low-confidence"))[:60]
+        # deterministic clamp, not a model's call: a defect this diff did not
+        # introduce cannot gate its merge however bad it is
+        if f.get("scope") == "pre_existing" and f["verdict"] == "block":
+            f["verdict"] = "note"
+        if u := v.get("usage"):
+            out.append(u)
+    return out
+
+
+def accounting(stats: dict, usage: list[dict], v_usage: list[dict] = ()) -> dict:
     """Token spend per system. Not comparable as money: system 1 is metered
     API tokens; system 2 is the subscription, where notional_usd is an
     API-equivalent figure, not a bill."""
     tot = lambda k: sum(u[k] for u in usage)
-    return {"system1_jev": stats.get("system1_usage", {"calls": 0}),
+    t1 = dict(stats.get("system1_usage") or {"calls": 0})
+    # two tier-1 call sites now: triage before the review, adjudication after
+    t1["verdict_calls"] = len(v_usage)
+    t1["verdict_tokens"] = sum(u.get("input_tokens", 0) + u.get("output_tokens", 0)
+                               for u in v_usage)
+    return {"system1_jev": t1,
             "system2_claude": {
                 "calls": len(usage),
                 "models": Counter(u["model"] for u in usage),
@@ -119,6 +159,8 @@ def main() -> int:
                     help="working dir for the agent's Read tool")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=600, help="seconds per bundle")
+    ap.add_argument("--no-verdict", action="store_true",
+                    help="skip tier-1 adjudication; keep the reviewer's severity")
     ap.add_argument("--cheap-model", default="opus",
                     help="model for low-risk bundles; 'sonnet' enables the "
                          "tiering cost lever where the account has access")
@@ -141,10 +183,11 @@ def main() -> int:
     findings.sort(key=lambda f: (f.get("scope") == "pre_existing",
                                  rank.get(f.get("severity"), 3),
                                  -f.get("confidence", 0)))
+    v_usage = [] if a.no_verdict else adjudicate(findings, bundles)
     json.dump({"findings": findings}, sys.stdout, indent=2)
     print()
 
-    acct = accounting(doc["stats"], usage)
+    acct = accounting(doc["stats"], usage, v_usage)
     print(json.dumps(acct, indent=2), file=sys.stderr)
 
     # otherwise silent: light bundles run at full cost and nobody notices
@@ -152,12 +195,11 @@ def main() -> int:
         print(f"note: {lt} 'light' bundle(s) ran on opus -- model tiering is "
               "OFF; set --cheap-model", file=sys.stderr)
 
-    # a blocker this diff did not cause must not fail the author's CI
     new = [f for f in findings if f.get("scope") != "pre_existing"]
-    blockers = sum(f.get("severity") == "blocker" for f in new)
+    blockers = sum(f.get("verdict") == "block" for f in findings)
     sensitive = sum(b.get("sensitive", False) for b in bundles)
     print(f"{len(findings)} findings ({len(findings)-len(new)} pre-existing), "
-          f"{blockers} blockers, {sensitive} sensitive bundle(s) need a human",
+          f"{blockers} block, {sensitive} sensitive bundle(s) need a human",
           file=sys.stderr)
     return 1 if blockers or sensitive else 0      # non-zero fails CI
 

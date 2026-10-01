@@ -95,6 +95,54 @@ QUESTIONS = {
 }
 
 
+# The LAST decision in the pipeline. System 2 did the reasoning and wrote the
+# finding; what happens to it is a categorical call, which is tier 1's job.
+# Keeping it here means the gate cannot drift with reviewer phrasing.
+Q_VERDICT = "What should happen to this finding?"
+
+VERDICT_Q = {
+    Q_VERDICT: {
+        "type": "choice",
+        "instructions": (
+            "A reasoning model already analysed the change and wrote this finding; "
+            "you decide only its disposition, from the summary. scope 'pre_existing' "
+            "means the defect predates this change and its author cannot act on it. "
+            "reviewer_confidence is the reviewer's own probability the finding is "
+            "real -- low confidence argues for 'note', never for discarding it. "
+            "sensitive_path 'yes' means the file already forces human review, so it "
+            "is not by itself a reason to block."),
+        "criteria": {
+            "block": "Introduced by this change and would crash, corrupt data or break a contract in production",
+            "fix": "Introduced by this change and worth fixing, but merging it will not break production",
+            "note": "Pre-existing, speculative or low-confidence -- record it, do not gate the merge on it"},
+    },
+}
+
+
+def flat(s: object, n: int = 240) -> str:
+    """One line, bounded. Findings are prose; the record must stay scannable
+    and must not smuggle a diff across in a `failure_scenario`."""
+    return " ".join(str(s or "").split())[:n]
+
+
+def verdict(f: dict, sensitive: bool = False) -> dict:
+    """Tier 1 adjudicates a tier-2 finding. Never raises -- an outage must
+    leave the caller free to fall back to the reviewer's own severity."""
+    rec = {"severity_claimed": flat(f.get("severity")) or "unknown",
+           "scope": flat(f.get("scope")) or "unknown",
+           "reviewer_confidence": f.get("confidence", 0),
+           "summary": flat(f.get("summary")),
+           "failure": flat(f.get("failure_scenario")),
+           "sensitive_path": "yes" if sensitive else "no"}
+    try:
+        raw = ask(_no_source(rec), VERDICT_Q)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "usage": {}}
+    a = (raw.get("answers") or {}).get(Q_VERDICT) or {}
+    return {"ok": True, "verdict": a.get("choice"),
+            "confidence": a.get("confidence"), "usage": raw.get("usage") or {}}
+
+
 def features(b: dict) -> dict:
     """~70 tokens, no source. Fits Laya's ~320-token budget, keeping the
     vendor swappable."""
@@ -112,11 +160,14 @@ def features(b: dict) -> dict:
         "sensitive_path": "yes" if b.get("sensitive") else "no",
         "found_in_graph": "yes" if f.get("in_graph") else "no",
     }
-    # Guard, not a test: source code must never reach an external vendor.
-    # Every field above is a single-line name or count, so a newline or a hunk
-    # header means diff text got in.
-    blob = json.dumps(rec)
-    if "@@" in blob or "\\n" in blob:     # json escapes a real newline to \n
+    return _no_source(rec)
+
+
+def _no_source(rec: dict) -> dict:
+    """Guard, not a test: source must never reach an external vendor. Every
+    field is a single-line name, count or flattened sentence, so a newline or
+    a hunk header means diff text got in."""
+    if "@@" in (blob := json.dumps(rec)) or "\\n" in blob:   # json escapes \n
         raise ValueError("source code leaked into the system-1 record")
     return rec
 

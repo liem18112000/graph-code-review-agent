@@ -140,6 +140,11 @@ Stop at the first rung that resolves the hunk. This is what keeps **both** syste
 | **0** | Path globs, linters, SAST, diff heuristics (pure-rename, pure-format, lockfile, generated code) | **zero** | Formatting, dependency CVEs, known patterns, and the hard overrides in §8 |
 | **1** | Jev over a **compact structural record** — never the hunk (§4.1) | ~$0.042/1M, ~250 ms | Ranking, risk class, "does this need system 2 at all" |
 | **2** | `graph-reviewer` agent, model tier chosen by risk | **system 2** | Actual reasoning about actual problems |
+| **1 again** | Jev over each finding — the verdict (§4.2) | ~660 tokens/finding | What *happens* to what system 2 found |
+
+The ladder runs tier 1 **twice**, once on each side of the reasoning: it decides
+what deserves system 2, and then what system 2's output means. System 2 is the
+only expensive rung, so it should do nothing but reason.
 
 Tier 0 is not a formality. On a typical PR a large share of hunks are generated files,
 lockfiles, imports and formatting. Every one resolved for free never reaches either model.
@@ -237,6 +242,33 @@ LLM reads *code*.
 
 Whether these apply to Jev is unknown — they are Laya-specific findings. Do not
 pre-emptively code around another vendor's bugs.
+
+### 4.2 System 1 also closes the loop — the verdict
+
+System 2 reasons; it does not decide. Once findings exist, each one goes back to
+tier 1 as a flattened record (`severity_claimed`, `scope`, `reviewer_confidence`,
+`summary`, `failure`, `sensitive_path`) and tier 1 returns `block | fix | note`.
+`agent.py` applies that choice, and the exit code follows it.
+
+The reason is drift. A merge gate keyed on whichever adjective a reasoning model
+reached for this run is not a gate — rephrase a finding and the build flips. A
+cheap classifier over a fixed-shape record is reproducible, costs ~660 tokens per
+finding, and is the same primitive already trusted for routing.
+
+Two rules stay in code, not in the model, because they are already known (§4):
+
+- `scope: pre_existing` is **clamped** to never block, whatever tier 1 says — a
+  defect this diff did not cause cannot gate its author's merge.
+- Tier 1 down, or confidence < 0.70 → fall back to the reviewer's own severity.
+  Degrade, never downgrade (§8).
+
+**Measured limit, worth knowing before you tune it.** Tier 1 is confident
+(0.82–1.00) on `note`, which follows from the supplied `scope` field, and
+unconfident (0.27–0.72) on `block` vs `fix`, which needs production impact it
+cannot see. Three framings were tried, including a `block`/`pass` binary that
+scored worse than either. So roughly a third of findings take the fallback by
+design. That is the honest boundary of a system-1 slot: it decides what its
+record determines, and defers what the record does not.
 
 ---
 
