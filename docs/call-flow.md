@@ -121,7 +121,8 @@ per-symbol lookup silently returns "no tests" for a well-covered class.
 `review.py:134-176`. Group by **package directory** (`review.py:136`) — this
 graph ships no community data, and for Java the package is the module boundary.
 Sort by `(path, start)` before chunking (`review.py:140`) so a file's hunks stay
-together, then chunk by `--max-bundle` (default 6).
+together, then chunk by `--max-bundle` (default 12 -- each bundle is one agent paying
+its own cold cache write, so coarse beats fine).
 
 `rank()` (`review.py:98`) produces a deterministic tier-0 prior **and its
 basis**, so the ordering is explainable:

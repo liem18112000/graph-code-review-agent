@@ -136,7 +136,10 @@ def main() -> int:
                                       a.timeout, a.cheap_model))
 
     rank = {"blocker": 0, "should_fix": 1, "nitpick": 2}
-    findings.sort(key=lambda f: (rank.get(f.get("severity"), 3),
+    # pre-existing defects are real but the author of this diff cannot act on
+    # them, so they sink below everything introduced regardless of severity
+    findings.sort(key=lambda f: (f.get("scope") == "pre_existing",
+                                 rank.get(f.get("severity"), 3),
                                  -f.get("confidence", 0)))
     json.dump({"findings": findings}, sys.stdout, indent=2)
     print()
@@ -144,10 +147,18 @@ def main() -> int:
     acct = accounting(doc["stats"], usage)
     print(json.dumps(acct, indent=2), file=sys.stderr)
 
-    blockers = sum(f.get("severity") == "blocker" for f in findings)
+    # otherwise silent: light bundles run at full cost and nobody notices
+    if (lt := sum(b.get("route") in CHEAP_ROUTES for b in bundles)) and a.cheap_model == "opus":
+        print(f"note: {lt} 'light' bundle(s) ran on opus -- model tiering is "
+              "OFF; set --cheap-model", file=sys.stderr)
+
+    # a blocker this diff did not cause must not fail the author's CI
+    new = [f for f in findings if f.get("scope") != "pre_existing"]
+    blockers = sum(f.get("severity") == "blocker" for f in new)
     sensitive = sum(b.get("sensitive", False) for b in bundles)
-    print(f"{len(findings)} findings, {blockers} blockers, "
-          f"{sensitive} sensitive bundle(s) need a human", file=sys.stderr)
+    print(f"{len(findings)} findings ({len(findings)-len(new)} pre-existing), "
+          f"{blockers} blockers, {sensitive} sensitive bundle(s) need a human",
+          file=sys.stderr)
     return 1 if blockers or sensitive else 0      # non-zero fails CI
 
 

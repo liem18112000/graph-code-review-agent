@@ -18,17 +18,37 @@ DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
 ENV_FILE = Path(__file__).with_name(".env")
 
 
-def env(name: str) -> str:
-    """Environment, then .env beside this file -- a shell export does not
-    survive into CI, a git hook, or another tool's shell."""
+def _registry(name: str) -> str:
+    """Where `setx` writes. A process started before it ran never sees the
+    value -- its environment block was copied at spawn."""
+    if os.name != "nt":
+        return ""
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+            return str(winreg.QueryValueEx(k, name)[0])
+    except OSError:
+        return ""
+
+
+def env_source(name: str) -> tuple[str, str]:
+    """(value, origin). Env, then .env beside this file, then the registry --
+    an export survives none of CI, a git hook, or another tool's shell.
+    Precedence lives here only; a caller re-deriving it will label it wrong."""
     if v := os.environ.get(name):
-        return v
+        return v, "environment"
     if ENV_FILE.exists():
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             k, _, v = line.partition("=")
             if k.strip() == name:
-                return v.strip().strip("'\"")
-    return ""
+                return v.strip().strip("'\""), ".env"
+    if v := _registry(name):
+        return v, "registry (set, but not inherited -- reopen the shell)"
+    return "", ""
+
+
+def env(name: str) -> str:
+    return env_source(name)[0]
 
 # Only what we cannot already compute. `tests_missing` and `needs_deep_review`
 # were dropped: covering_tests is a deterministic tier-0 fact, and deep-review
@@ -44,15 +64,19 @@ QUESTIONS = {
         "type": "choice",
         "instructions": (
             "Judge risk from the supplied structural facts only; you cannot see the "
-            "source. Treat max_callers 'unknown' as UNMEASURED, never as zero — on a "
-            "framework-wired codebase it usually means the runtime invokes this code "
-            "directly. A non-empty entry_point means untrusted or asynchronous "
-            "invocation reaches it. covering_tests 0 means no test references these "
-            "files, even though the change may still be trivial."),
+            "source. Treat max_callers 'unknown' as UNMEASURED, never as zero: the "
+            "graph records only call edges it could resolve. entry_point, not "
+            "unknown_callers, is the authority on whether the runtime invokes this "
+            "code -- when entry_point is 'none', unmeasured callers are missing data "
+            "and not by themselves a danger signal. covering_tests counts test files "
+            "referencing these files; a non-zero count means the behaviour is "
+            "exercised whoever calls it. Report high confidence when one criterion "
+            "plainly fits, and do not lower it merely because some callers are "
+            "unmeasured -- that is the normal state of a framework-wired codebase."),
         "criteria": {
-            "low": "Few known callers, no entry point, and at least one covering test",
-            "medium": "Shared behaviour, many callers, or no covering tests, but no entry point or sensitive path",
-            "high": "An entry point, a sensitive path, or wide fan-in combined with no covering tests"},
+            "low": "No entry point, not a sensitive path, and at least one covering test. Unmeasured callers are expected here and do not raise the level.",
+            "medium": "No entry point and not sensitive, but no covering test, or wide measured fan-in",
+            "high": "An entry point, a sensitive path, or wide measured fan-in with no covering tests"},
     },
     Q_SEC: {
         "type": "choice",

@@ -61,6 +61,13 @@ change with no covering test.
    wrong behaviour that results. "Could be a problem" is not a finding.
 5. **Do not restate what the code does.** A reviewer reading your output already
    read the diff.
+6. **Set `scope` on every finding — `introduced` or `pre_existing`.** Holding the
+   neighbourhood makes it easy to review the neighbourhood instead of the
+   change, and a defect this diff did not cause is not actionable by its
+   author. `pre_existing` means the defect is also on the `-` side, or the
+   diff only renamed/moved the code carrying it. Report both kinds; never
+   suppress. When unsure, say `introduced` — a wrong `pre_existing` hides a
+   real regression.
 
 Zero findings is a valid answer — return `[]` — but reach it by finding nothing,
 not by filtering what you found.
@@ -75,6 +82,7 @@ Return **only** a JSON array, most severe first, no prose around it:
     "file": "src/main/java/a/Foo.java",
     "line": 42,
     "severity": "blocker | should_fix | nitpick",
+    "scope": "introduced | pre_existing",
     "summary": "one sentence naming the defect",
     "failure_scenario": "concrete inputs/state -> wrong output or crash",
     "grounded_in": "the changed line or the fact this rests on",

@@ -42,42 +42,47 @@ environment. Exit code 2 means the key is missing; `--no-system1` skips tier 1.
 Report `stats`: hunks dropped free, bundles produced, `system1_ok`, and
 `system1_usage` (tier-1 token spend).
 
-## 3. Dispatch one agent per bundle
+## 3. Dispatch
 
-Bundles arrive sorted by `risk_hint`, and each carries a `route` from tier 1.
-Send each to the `graph-reviewer` subagent **in parallel** — they are independent.
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/agent.py" --bundles /tmp/bundles.json --repo .
+echo $?     # 1 = blockers introduced, or sensitive bundles present
+```
 
-Pass the bundle JSON verbatim. Do not summarise it, do not strip `facts`, and do
-not add repository context of your own: the whole design rests on the agent
-receiving resolved facts rather than hunting for them.
+That is the whole step. `agent.py` reads the file, runs one `graph-reviewer` per
+bundle in parallel on the subscription, picks the model from each bundle's
+`route`, and prints findings on stdout with accounting on stderr.
 
-| `route` | Model | Effort | Also |
-|---|---|---|---|
-| `human+top` | top tier | `max` | **flag for required human review** |
-| `full` | top tier | `high` | |
-| `light` | cheap tier | `low` | |
+**Never hand-copy bundle JSON into a prompt** — copying it is how you corrupt
+it. If you dispatch the subagent yourself for live progress, pass it the
+**path and the bundle id** and let it `Read`. Reading a prepared fact file is
+not exploration; the no-search rule holds because the agent has no search tool.
+
+| `route` | Model | Also |
+|---|---|---|
+| `human+top` | top tier | **flag for required human review** |
+| `full` | top tier | |
+| `light` | `--cheap-model` | off unless the account can reach a cheaper model |
+
+`agent.py` warns on stderr when bundles route `light` but no cheap model is
+configured — that means the tiering lever did not fire and they ran at full cost.
 
 Bundles with `in_graph: false` still get reviewed — absence from the graph is not
 evidence of safety.
 
-## 4. Collect and report
+## 4. Report
 
-Each agent returns a JSON array of findings. Concatenate, keep bundle order, and
-report:
+Findings arrive sorted: introduced before pre-existing, then by severity. Report:
 
-- every `blocker` and `should_fix`, grouped by file
+- every **introduced** `blocker` and `should_fix`, grouped by file
+- **pre-existing** findings in a separate, marked section — real defects this
+  diff did not cause. Mixed in, they read as a merge-blocking wall. Never drop.
 - the tier-0 summary from step 2 (what was resolved for free)
 - tier-1 token spend from `stats.system1_usage`
 - **an explicit human-review flag** if any bundle was `sensitive`
 
-## Headless alternative
-
-Steps 3–4 can run outside an interactive session — same agent, same prompt:
-
-```bash
-python "${CLAUDE_PLUGIN_ROOT}/agent.py" --bundles /tmp/bundles.json --repo .
-echo $?     # 1 = blockers or sensitive bundles present
-```
+Any token figure you quote for the *current* session is a lower bound — the turn
+that counts the tokens has not been billed yet when it counts them.
 
 ## Rules
 

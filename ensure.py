@@ -121,11 +121,10 @@ def check_key():
         import system1
     except Exception:                             # covered by check_modules
         return add("TYPESAFE_API_KEY", MUST1, FAIL, "cannot import system1", "")
-    key = system1.env("TYPESAFE_API_KEY")
+    key, src = system1.env_source("TYPESAFE_API_KEY")
     if not key:
-        return add("TYPESAFE_API_KEY", MUST1, FAIL, "not in environment or .env",
-                   KEY_FIX)
-    src = "environment" if os.environ.get("TYPESAFE_API_KEY") else ".env"
+        return add("TYPESAFE_API_KEY", MUST1, FAIL,
+                   "not in environment, .env, or the Windows registry", KEY_FIX)
     return add("TYPESAFE_API_KEY", MUST1, OK, "%d chars, from %s" % (len(key), src))
 
 

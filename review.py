@@ -200,7 +200,9 @@ def main() -> int:
     ap.add_argument("--graph", type=Path)
     ap.add_argument("--repo", type=Path, help="working tree, for the annotation scan")
     ap.add_argument("--overrides", type=Path, default=Path("overrides.toml"))
-    ap.add_argument("--max-bundle", type=int, default=6)
+    # one agent per bundle, each paying a cold cache write (24% of subagent
+    # tokens, measured) however little it reviews -- so bundle coarsely
+    ap.add_argument("--max-bundle", type=int, default=12)
     ap.add_argument("--no-system1", action="store_true",
                     help="skip tier 1 triage (on by default)")
     ap.add_argument("--gate", action="store_true",
@@ -224,8 +226,9 @@ def main() -> int:
         # is down is an OUTAGE -> §8 says degrade and escalate, which
         # triage()/route() already do.
         if not system1.env("TYPESAFE_API_KEY"):
-            print("TYPESAFE_API_KEY not found in environment or .env -- tier 1 "
-                  "is required; pass --no-system1 to skip", file=sys.stderr)
+            print("TYPESAFE_API_KEY not found in environment, .env, or the "
+                  "Windows registry -- tier 1 is required; pass --no-system1 "
+                  "to skip", file=sys.stderr)
             return 2
         for b in res["bundles"]:
             b["triage"] = system1.triage(b)
