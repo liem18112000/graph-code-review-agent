@@ -116,7 +116,8 @@ def adjudicate(findings: list[dict], bundles: list[dict]) -> list[dict]:
     out = []
     for f in findings:
         v = system1.verdict(f, sens.get(f.get("bundle"), False))
-        ok = v.get("ok") and (v.get("confidence") or 0) >= 0.70
+        ok = (v.get("ok") and (v.get("confidence") or 0) >= 0.70
+              and v.get("verdict") in ("block", "fix", "note"))
         f["verdict"] = v["verdict"] if ok else FALLBACK.get(f.get("severity"), "fix")
         f["verdict_by"] = "system1" if ok else "fallback:" + str(v.get("error", "low-confidence"))[:60]
         # deterministic clamp, not a model's call: a defect this diff did not
@@ -183,7 +184,15 @@ def main() -> int:
     findings.sort(key=lambda f: (f.get("scope") == "pre_existing",
                                  rank.get(f.get("severity"), 3),
                                  -f.get("confidence", 0)))
-    v_usage = [] if a.no_verdict else adjudicate(findings, bundles)
+    if a.no_verdict:
+        v_usage = []
+        for f in findings:                    # same fallback adjudicate() uses when tier 1 is down
+            f["verdict"] = FALLBACK.get(f.get("severity"), "fix")
+            f["verdict_by"] = "fallback:--no-verdict"
+            if f.get("scope") == "pre_existing" and f["verdict"] == "block":
+                f["verdict"] = "note"
+    else:
+        v_usage = adjudicate(findings, bundles)
     json.dump({"findings": findings}, sys.stdout, indent=2)
     print()
 

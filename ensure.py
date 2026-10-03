@@ -39,7 +39,8 @@ GIT_FIX = pick("winget install Git.Git", "brew install git", "sudo apt install g
 GRAPHIFY_FIX = "install graphify per its own docs and put it on PATH"
 KEY_FIX = pick('setx TYPESAFE_API_KEY "<key>"   (reopen the shell afterwards)',
                'export TYPESAFE_API_KEY=<key>   (add to ~/.zshrc)',
-               'export TYPESAFE_API_KEY=<key>   (add to ~/.bashrc)')
+               'export TYPESAFE_API_KEY=<key>   (add to ~/.bashrc)'
+               ) + "   -- or run tier 1 self-hosted: set SYSTEM1_URL instead, no key needed"
 
 
 def add(name, tier, status, detail, fix=""):
@@ -116,16 +117,39 @@ def check_agent():
 
 
 def check_key():
+    """Two supported modes (README "Swapping the classifier"): hosted Jev with
+    a key, or a self-hosted SYSTEM1_URL (e.g. laya-serve) with none. Mirrors
+    the same gate review.py applies before tier 1 runs -- a key is only a MUST
+    against the default hosted endpoint."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
         import system1
     except Exception:                             # covered by check_modules
         return add("TYPESAFE_API_KEY", MUST1, FAIL, "cannot import system1", "")
+    url, _ = system1.env_source("SYSTEM1_URL")
+    self_hosted = bool(url) and url != system1.DEFAULT_URL
     key, src = system1.env_source("TYPESAFE_API_KEY")
-    if not key:
-        return add("TYPESAFE_API_KEY", MUST1, FAIL,
-                   "not in environment, .env, or the Windows registry", KEY_FIX)
-    return add("TYPESAFE_API_KEY", MUST1, OK, "%d chars, from %s" % (len(key), src))
+    if key:
+        return add("TYPESAFE_API_KEY", MUST1, OK, "%d chars, from %s" % (len(key), src))
+    if self_hosted:
+        return add("TYPESAFE_API_KEY", MUST1, OK,
+                   "not set -- SYSTEM1_URL overridden to %s, no key needed" % url)
+    where = ("environment, .env, or the registry" if WIN
+             else "environment or .env")
+    return add("TYPESAFE_API_KEY", MUST1, FAIL, "not in " + where, KEY_FIX)
+
+
+def check_system1_target():
+    """Informational only -- shows which tier-1 mode is actually configured,
+    so a misread env var is visible before --deep spends a real call on it."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import system1
+    url, src = system1.env_source("SYSTEM1_URL")
+    if not url:
+        return add("tier-1 endpoint", OPT, OK,
+                   "default (hosted Jev, %s)" % system1.DEFAULT_URL)
+    mode = "default" if url == system1.DEFAULT_URL else "self-hosted override"
+    return add("tier-1 endpoint", OPT, OK, "%s -- %s (from %s)" % (url, mode, src))
 
 
 def check_graph():
@@ -183,6 +207,7 @@ def main():
     check_python()
     check_modules()
     check_key()                                   # must-1
+    check_system1_target()
     check_cmd("claude", ["--version"], MUST2, CLAUDE_FIX)
     check_cmd("git", ["--version"], REQ, GIT_FIX)
     check_cmd("graphify", ["--version"], REQ, GRAPHIFY_FIX)

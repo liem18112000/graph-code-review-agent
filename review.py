@@ -222,10 +222,13 @@ def main() -> int:
 
     if not a.no_system1:
         import system1                       # late: review.py works offline
-        # A missing key is MISCONFIGURATION -> fail loudly. A key whose endpoint
+        # A missing key is MISCONFIGURATION -> fail loudly -- but only for the
+        # hosted Jev endpoint. A self-hosted SYSTEM1_URL (e.g. laya-serve) is
+        # the whole point of §4.1's swap: no key needed. A key whose endpoint
         # is down is an OUTAGE -> §8 says degrade and escalate, which
         # triage()/route() already do.
-        if not system1.env("TYPESAFE_API_KEY"):
+        url, _ = system1.env_source("SYSTEM1_URL")
+        if not (url and url != system1.DEFAULT_URL) and not system1.env("TYPESAFE_API_KEY"):
             print("TYPESAFE_API_KEY not found in environment, .env, or the "
                   "Windows registry -- tier 1 is required; pass --no-system1 "
                   "to skip", file=sys.stderr)

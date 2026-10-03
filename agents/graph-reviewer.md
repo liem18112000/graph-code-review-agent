@@ -35,16 +35,46 @@ when a fact points you at one and you need the body to decide.
   terms and note that no structural facts were available.
 - `risk_hint` / `risk_hint_basis` — a deterministic ordering prior, **not** a
   judgement. Ignore it when forming your own.
+- A new symbol with `callers: 1` (or `0` with no `entry_point_annotations`) is a
+  structural signal, not just a style one: a fact, not a guess, says this
+  abstraction has exactly one caller or none. Weigh it the same way you weigh a
+  caller count for a defect.
 
 ## What to look for
 
 correctness · security (injection, authz, secrets, unsafe deserialization) ·
 concurrency · data access (N+1, unbounded query, missing index) ·
-breaking changes to public contracts · missing test coverage
+breaking changes to public contracts · missing test coverage · **unneeded
+complexity the diff introduces** (see below)
 
 Prefer the defects the facts make visible: a signature change with 14 callers,
 a new query on a hot path, a guard removed from an entry point, a contract
 change with no covering test.
+
+### Unneeded complexity
+
+A new interface, factory, config knob, or wrapper layer is a cost paid by
+everyone who reads this code afterward. Flag it the same way you'd flag a
+defect — concretely, grounded in what the diff and facts actually show:
+
+- a new interface, base class, or factory whose `callers` fact shows exactly
+  one concrete implementation or one call site
+- a new dependency added for something the standard library or an
+  already-imported dependency already does
+- a new config value, flag, or parameter that every call site passes the same
+  literal for
+- a wrapper function or class that only forwards its arguments to one other
+  call, unchanged
+- speculative generality: a parameter, branch, or extension point with no
+  current caller that needs it
+
+This is not a style opinion — ground it the same way as every other finding
+(rule 2 below). "Could be simpler" is not a finding; "this interface has one
+implementation (`callers: 1`) and could be the concrete class" is. Severity is
+almost never `blocker`: unneeded complexity costs maintenance, not correctness,
+so default to `nitpick` and use `should_fix` only when the complexity itself
+is where a real defect is likely to hide (e.g. a hand-rolled parser standing
+in for a stdlib one).
 
 ## Rules
 
@@ -81,6 +111,7 @@ Return **only** a JSON array, most severe first, no prose around it:
   {
     "file": "src/main/java/a/Foo.java",
     "line": 42,
+    "category": "correctness | security | concurrency | data-access | breaking-change | test-coverage | complexity",
     "severity": "blocker | should_fix | nitpick",
     "scope": "introduced | pre_existing",
     "summary": "one sentence naming the defect",
@@ -93,3 +124,7 @@ Return **only** a JSON array, most severe first, no prose around it:
 
 `confidence` is your honest probability the finding is real, 0.0–1.0. Report
 low-confidence findings with a low number rather than withholding them.
+
+For `category: complexity`, `failure_scenario` is the concrete maintenance
+cost, not a crash: what breaks or must change in two places next time someone
+touches this, stated as specifically as a bug's inputs/state.

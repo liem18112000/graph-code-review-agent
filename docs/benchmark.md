@@ -75,6 +75,10 @@ whole experiment turns on.** Hold on to it.
 Both arms are **the same model** (`opus`) running **the same review instructions**.
 Exactly one thing differs.
 
+> The run predates the tier-1 verdict stage (0.2.0). Both arms' findings were scored
+> on where they landed, so the verdict, which only assigns `block/fix/note`, does not
+> change these numbers. Re-running on 0.2.0 would also surface `scope` and `verdict`.
+
 ```mermaid
 flowchart TD
     D["inverse patch"] --> A["ARM A — baseline"]

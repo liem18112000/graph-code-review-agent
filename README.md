@@ -18,6 +18,33 @@ tier 2   reasoning model, only where earned     the expensive part
 On a real 26-hunk diff: **13 hunks resolved free**, tier 1 cost **$0.00014** for all
 four bundles, and only what survived reached the reasoning model.
 
+```mermaid
+flowchart LR
+    D["diff + prebuilt graph"] --> T0["tier 0<br/>free filters"]
+    T0 --> T1["tier 1<br/>triage + route model"]
+    T1 --> T2["tier 2<br/>reviewer per bundle"]
+    T2 --> V["tier 1<br/>verdict block/fix/note"]
+    V --> OUT["findings + exit code"]
+    style T0 fill:#e6f4ea,stroke:#137333
+    style T2 fill:#f0e8fe,stroke:#8b42f4
+```
+
+## vs. a typical `/code-review` workflow
+
+| | `/code-review` (max effort) | This plugin |
+|---|---|---|
+| **Architecture** | N dimension agents, each over the full diff, then 3–5 skeptics per finding | Free filters → classifier → one reviewer per package *bundle* → classifier verdict |
+| **Finding callers/tests** | Every agent greps and reads, serially, at LLM price | Resolved once from a prebuilt graph; injected as facts, reviewer has no search tool |
+| **Model spend** | Top model everywhere | Trivial hunks never reach a model; per-route model tiering is built but **off** until `--cheap-model` is set |
+| **Verification** | Every finding re-litigated by 3–5 skeptics | None; one cheap classifier call per finding assigns the verdict |
+| **Merge gate** | Depends on the model's wording that run | Fixed-shape record → reproducible `block\|fix\|note` |
+| **Setup** | None | graphify + git hook, plus tier-1 access (hosted key **or** self-hosted) |
+| **Risk** | Slow, expensive | Stale graph or poor bundling silently costs recall |
+
+The cost and time wins are structural (less redundant work). **The quality claim is
+not yet proven** — see [Status](#status). Full diagrams and the cost model:
+[docs/architecture.md](docs/architecture.md#11-side-by-side--architecture-usage-optimization).
+
 ---
 
 ## Requirements
@@ -26,7 +53,7 @@ Two are **musts**, in this order:
 
 | | Why |
 |---|---|
-| **1. `TYPESAFE_API_KEY`** in the environment | Tier-1 triage. The only API key this system uses. Without it `review.py` exits 2. |
+| **1. Tier-1 access** — either `TYPESAFE_API_KEY` in the environment, **or** `SYSTEM1_URL` pointed at a self-hosted endpoint (e.g. `laya-serve`, no key needed) | Tier-1 triage. Pick one — see "Swapping the classifier". Neither configured → `review.py` exits 2. |
 | **2. Claude Code**, logged in | Runs the reviewer on your **subscription** — no `ANTHROPIC_API_KEY` |
 
 Then the tooling:
@@ -61,8 +88,16 @@ MUST 2 -- Claude Code usable
 Required tooling
   [  ok  ] python                3.12.1 (tomllib present)
   ...
+Optional
+  [  ok  ] tier-1 endpoint       default (hosted Jev, https://api.typesafe.ai/v1/systemone)
+  ...
 READY.
 ```
+
+Point `SYSTEM1_URL` at a self-hosted endpoint instead (see "Swapping the
+classifier") and the same `TYPESAFE_API_KEY` row reports `ok` with **no key
+set** — the gate tracks whichever mode is actually configured, not a fixed
+vendor.
 
 Add `--deep` to prove the tier-1 endpoint answers and Claude auth works, rather
 than just checking the binaries exist. Exit code is 0 only when every required
@@ -84,10 +119,11 @@ graphify update .          # build the graph
 graphify hook install      # keep it current on every commit
 ```
 
-Verify the key is visible to Claude Code:
+Verify tier 1 is configured — either the key, or a self-hosted override:
 
 ```bash
-echo $TYPESAFE_API_KEY     # must be set; see "Key resolution" below
+echo $TYPESAFE_API_KEY     # hosted Jev; see "Key resolution" below
+echo $SYSTEM1_URL          # self-hosted alternative (e.g. laya-serve); see "Swapping the classifier"
 ```
 
 ---
@@ -154,7 +190,8 @@ scanned from **source annotations** rather than inferred from graph topology.
 ## Key resolution
 
 `TYPESAFE_API_KEY` is read from the environment first, then from a `.env` beside
-the scripts. A shell `export` does not survive into CI, a git hook, or another
+the scripts, then (Windows only) the user registry where `setx` writes. A custom
+`SYSTEM1_URL` needs no key. A shell `export` does not survive into CI, a git hook, or another
 tool's subprocess — the `.env` fallback exists for exactly those cases.
 
 ```bash
@@ -166,7 +203,7 @@ Two failure modes, handled differently on purpose:
 
 | Situation | Behaviour |
 |---|---|
-| Key absent — **misconfiguration** | Exit 2 before any work, with the fix in the message |
+| Key absent *and* `SYSTEM1_URL` still default — **misconfiguration** | Exit 2 before any work, with the fix in the message |
 | Key present, endpoint down — **outage** | Degrade and **escalate**; never downgrades a bundle to the cheap tier |
 
 ---
@@ -186,6 +223,18 @@ counts, test counts. **No diff, no source.** A runtime guard in `system1.py` rai
 if diff text ever reaches it, which is what makes an external classifier acceptable
 against a proprietary codebase.
 
+To stand up the self-hosted side on a blank machine:
+
+```bash
+pip install "laya[serve]"
+laya-serve                 # listens on :8000, implements the same /v1/systemone contract
+```
+
+Set `SYSTEM1_URL` (and leave `TYPESAFE_API_KEY` unset) and every script above
+picks it up unchanged — `ensure.py` reports which mode is configured under
+"tier-1 endpoint", and `review.py` / `agent.py` only require a key when
+`SYSTEM1_URL` is still the hosted default.
+
 ---
 
 ## Layout
@@ -198,9 +247,11 @@ review.py           diff -> hunks -> graph facts -> ranked bundles
 system1.py          tier-1 client (the swappable slot)
 agent.py            headless driver: one `claude -p` per bundle
 diffparse.py        unified-diff parsing
+ensure.py           preflight check (.sh / .ps1 shims find Python first)
+test_agent.py       self-check for the merge-gate fallback
 bench.py            A/B replay harness for measuring against a baseline
 overrides.toml      tier-0 globs: sensitive / skip / tests
-docs/               architecture.md (why) and call-flow.md (what calls what)
+docs/               architecture.md (why), call-flow.md (what calls what), benchmark.md
 ```
 
 ---

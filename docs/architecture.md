@@ -15,6 +15,23 @@ Shaped as **one agent plus one script**, not an orchestration service.
 > contract — **Laya** ([`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya))
 > can replace Jev later by changing a base URL. See §4.1.
 
+> **Design vs. built.** This document started as a design; the code now exists and
+> differs in places. Where it does, the text says **Built:** or **Not built:**.
+> The short version:
+>
+> | Designed | Status |
+> |---|---|
+> | Tier 0 globs + whitespace filter | **Built** (`review.py`, `overrides.toml`) |
+> | Facts from graph, bundled | **Built**, bundled by *package directory* |
+> | Tier 1 risk triage + routing | **Built**; routes the model and, with `--gate`, reorders the queue |
+> | Tier 1 skips low-risk bundles | **Not built** — every surviving bundle reaches system 2 |
+> | Model tiering (cheap model on `light`) | **Built but inert** — `--cheap-model` defaults to `opus` |
+> | Tier 1 verdict `block/fix/note` | **Built** (`agent.py adjudicate`) |
+> | Separate verifier for suspicious findings | **Not built** |
+> | Second independent reviewer on high-risk bundles | **Not built** |
+> | System-1 hints passed to the reviewer | **Not built** — the reviewer sees facts only |
+> | Graph-freshness check | Manual step in the skill, not enforced in code |
+
 > **Supersedes** the previous revision's §9.5, which argued a flat-rate subscription
 > weakened the case for cheap triage. Token cost is now an explicit goal, so triage is a
 > first-class lever again — and §4 adds a **free tier beneath it**.
@@ -68,6 +85,98 @@ It is a strong baseline. Its costs are structural, and that is what makes them b
 Three of those four are addressable without touching recall. The fourth (`D`) is
 addressable only if something else supplies the recall — which is §7's argument.
 
+### 1.1 Side by side — architecture, usage, optimization
+
+The same PR through both pipelines. Red is where tokens or wall-clock are spent
+rediscovering or re-litigating; green is where this design spends nothing.
+
+```mermaid
+flowchart TB
+    subgraph BASE["/code-review workflow, max effort"]
+        direction TB
+        b1["diff"] --> b2["N dimension agents<br/>(top model, each sees full diff)"]
+        b2 --> b3["each agent greps/reads<br/>to find callers, callees, tests"]
+        b3 --> b4["findings"]
+        b4 --> b5["3-5 skeptics per finding"]
+        b5 --> b6["report"]
+    end
+
+    subgraph OURS["graph-code-review-agent"]
+        direction TB
+        o1["diff + prebuilt graph.json"] --> o2["tier 0: free filters"]
+        o2 --> o3["tier 1: classifier ranks bundles<br/>(structure only, no source)"]
+        o3 --> o4["tier 2: one reviewer per bundle<br/>(facts served, Read-only, model chosen by route)"]
+        o4 --> o5["tier 1: verdict block/fix/note"]
+        o5 --> o7["report + exit code"]
+    end
+
+    style b3 fill:#fde8e8,stroke:#d93025
+    style b5 fill:#fde8e8,stroke:#d93025
+    style o2 fill:#e6f4ea,stroke:#137333
+    style o3 fill:#e6f4ea,stroke:#137333
+    style o4 fill:#f0e8fe,stroke:#8b42f4
+```
+
+**Where the time goes** — one dimension agent, baseline vs. here:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Reviewer (LLM)
+    participant FS as Repo (grep/read)
+    participant G as graph.json (prebuilt)
+
+    rect rgb(253,232,232)
+    Note over R,FS: Baseline — repeated by every dimension agent
+    R->>FS: grep callers of foo()
+    FS-->>R: matches
+    R->>FS: read caller bodies
+    FS-->>R: source
+    R->>FS: grep tests
+    FS-->>R: matches
+    Note over R: reasons, after N serial round-trips
+    end
+
+    rect rgb(230,244,234)
+    Note over R,G: This design — resolved once, before the LLM runs
+    G-->>R: callers, callees, tests, entry-point annotations<br/>(in the prompt, 0 round-trips)
+    Note over R: reasons immediately
+    end
+```
+
+| | `/code-review` workflow (max effort) | graph-code-review-agent |
+|---|---|---|
+| **Structure discovery** | Each agent greps/reads at LLM price, serially | Graph built by a git hook; facts injected as text |
+| **Unit of review** | One agent per *dimension*, each over the whole diff | One agent per *risk bundle* (package-level), all lenses in one call |
+| **Trivial hunks** | Paid for by every dimension | Dropped at tier 0 (13 of 26 on the reference run) |
+| **Model choice** | Top model everywhere | Route per bundle (`light` / `full` / `human+top`); the cheap model for `light` is **off by default**, so today everything runs `opus` |
+| **Verification** | 3–5 skeptics on every finding | None. One tier-1 call (~660 tokens) per finding assigns the verdict; no adversarial re-check |
+| **Severity / gate** | Whatever the reasoning model said this run | Fixed-shape record → classifier → reproducible `block\|fix\|note`; exit code follows |
+| **Auth / keys** | Claude Code only | Claude Code **plus** `TYPESAFE_API_KEY` for tier 1 |
+| **Setup** | None | Install graphify, build graph, install hook |
+| **Source confidentiality** | Source goes to Claude | Same for Claude; the *extra* classifier sees structure only |
+| **Failure mode** | Slow and expensive | Stale graph or bad bundling silently loses recall |
+| **Evidence it is better** | The reference baseline | **None yet** — see README "Status"; cost wins are structural, quality is unproven |
+
+**Optimization map** — which lever removes which cost term:
+
+```mermaid
+flowchart LR
+    T1["D x S_explore<br/>repeated grep"] -->|"lever 1: graph facts"| W1["~0"]
+    T2["D x S_diff<br/>full diff per lens"] -->|"lever 2: tier 0 + bundling"| W2["only risky hunks, once"]
+    T3["F x V<br/>skeptics per finding"] -->|"lever 3: one cheap verdict call"| W3["F x ~660 tokens"]
+    T4["top model everywhere"] -->|"lever 2: model tiering (inert by default)"| W4["top model only where route says"]
+
+    style W1 fill:#e6f4ea,stroke:#137333
+    style W2 fill:#e6f4ea,stroke:#137333
+    style W3 fill:#e6f4ea,stroke:#137333
+    style W4 fill:#e6f4ea,stroke:#137333
+```
+
+The trade, stated once: this design **adds** a setup step, a second vendor and a
+failure mode (stale graph) in exchange for removing redundant work. It does not
+claim the baseline is wrong — only that its cost is structural and avoidable.
+
 ---
 
 ## 2. The three levers
@@ -81,13 +190,13 @@ flowchart TD
     end
 
     subgraph L2["Lever 2 — spend in proportion to risk"]
-        D["Free deterministic tier"] --> E["System 1 triage"] --> F["System 2 only where earned"]
-        F --> G["<b>D and S_diff shrink to the hunks that matter</b>"]
+        D["Free deterministic tier"] --> E["System 1 triage<br/>(routes the model)"] --> F["System 2 on the surviving bundles"]
+        F --> G["<b>D and S_diff shrink to the hunks that survive tier 0</b>"]
     end
 
-    subgraph L3["Lever 3 — budget the verification"]
-        H["Verify suspicious findings, not all findings"]
-        H --> I["<b>F x V shrinks to F_suspicious</b>"]
+    subgraph L3["Lever 3 — replace verification with a verdict"]
+        H["Tier 1 classifies each finding<br/>instead of 3-5 skeptics re-deriving it"]
+        H --> I["<b>V shrinks from 3-5 LLM runs to one ~660-token call</b>"]
     end
 
     style C fill:#e6f4ea,stroke:#137333
@@ -105,19 +214,19 @@ justifies reducing `D`. See §7.
 
 ```mermaid
 flowchart LR
-    PR["PR diff"] --> S["<b>review.py</b><br/>the only real code"]
+    PR["PR diff"] --> S["<b>review.py</b>"]
     HOOK["post-commit hook"] -.->|"graph.json<br/>already built"| S
 
     S --> T0{"Tier 0<br/>deterministic"}
-    T0 -->|"resolved"| DONE["report, no model"]
-    T0 -->|"survives"| T1{"Tier 1<br/>Jev"}
-    T1 -->|"low risk"| DONE
-    T1 -->|"earns it"| T2["<b>graph-reviewer agent</b><br/>one per risk bundle"]
+    T0 -->|"resolved"| DONE["dropped, no model"]
+    T0 -->|"survives"| FB["facts + bundles<br/>(by package, max 12 hunks)"]
+    FB --> T1["Tier 1 (Jev)<br/>risk + security per bundle"]
+    T1 --> RT["route:<br/>light / full / human+top"]
 
-    T2 --> FIND["findings, self-scored"]
-    FIND --> T1B{"Jev:<br/>grounded?"}
-    T1B -->|"clean"| OUT["ReportFindings"]
-    T1B -->|"suspicious<br/>or blocker"| VER["one verifier"] --> OUT
+    RT --> T2["<b>agent.py</b> → graph-reviewer<br/>one claude -p per bundle"]
+    T2 --> FIND["findings<br/>(scope, severity, confidence)"]
+    FIND --> T1B["Tier 1 (Jev)<br/>verdict block / fix / note"]
+    T1B --> OUT["findings.json + exit code"]
 
     style S fill:#e8f0fe,stroke:#4285f4
     style T0 fill:#e6f4ea,stroke:#137333
@@ -126,8 +235,81 @@ flowchart LR
     style T2 fill:#f0e8fe,stroke:#8b42f4
 ```
 
+Every bundle that survives tier 0 is reviewed by system 2; tier 1's route picks the
+model (and, with `--gate`, the order), it does not skip a bundle.
+
 Everything left of `graph-reviewer` costs **zero system-2 tokens**. The graph is built by
 a git hook before the PR exists, so it is off the critical path entirely.
+
+End-to-end, as a sequence:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Git as git hook
+    participant RV as review.py
+    participant S1 as System 1 (Jev)
+    participant AG as agent.py
+    participant S2 as graph-reviewer (Claude)
+
+    Git->>Git: graphify update (local, 0 tokens)
+    Note over Git: graph.json ready before the PR exists
+    RV->>RV: parse diff, tier 0 drops skip-glob + whitespace-only hunks
+    RV->>RV: map hunks to nodes, attach facts, bundle by package
+    loop each bundle
+        RV->>S1: structural record (no source)
+        S1-->>RV: risk + security + confidence
+        RV->>RV: route() = light / full / human+top
+    end
+    RV-->>AG: bundles.json (ordered by risk_hint; by route with --gate)
+    par up to --concurrency bundles
+        AG->>S2: claude -p, facts + hunks (Read only, no search)
+        S2-->>AG: JSON findings with scope, severity, confidence
+    end
+    loop each finding
+        AG->>S1: flattened finding record
+        S1-->>AG: block / fix / note + confidence
+    end
+    AG-->>AG: clamp pre_existing, fall back if conf < 0.70
+    AG-->>AG: exit code (1 = blocker or human needed)
+```
+
+Component view — what is code, what is prompt, what is reused:
+
+```mermaid
+flowchart TB
+    subgraph REUSED["Reused, not written"]
+        GFY["graphify + git hook"]
+        CC["Claude Code runtime"]
+        LINT["CI linters / SAST"]
+    end
+    subgraph CODE["Written (stdlib Python)"]
+        REV["review.py"]
+        DP["diffparse.py"]
+        SY1["system1.py<br/>swap seam"]
+        AGT["agent.py"]
+        BEN["bench.py"]
+    end
+    subgraph CFG["Config / prompt"]
+        OV["overrides.toml"]
+        PROMPT["graph-reviewer.md"]
+        SK["graph-review SKILL.md"]
+    end
+
+    GFY --> REV
+    DP --> REV
+    OV --> REV
+    REV --> SY1
+    REV --> AGT
+    SY1 --> AGT
+    AGT --> CC
+    PROMPT --> CC
+    SK --> AGT
+    DP --> BEN
+
+    style SY1 fill:#fef3e8,stroke:#f4a142
+    style REV fill:#e8f0fe,stroke:#4285f4
+```
 
 ---
 
@@ -137,25 +319,51 @@ Stop at the first rung that resolves the hunk. This is what keeps **both** syste
 
 | Tier | Mechanism | Token cost | Handles |
 |---|---|---|---|
-| **0** | Path globs, linters, SAST, diff heuristics (pure-rename, pure-format, lockfile, generated code) | **zero** | Formatting, dependency CVEs, known patterns, and the hard overrides in §8 |
-| **1** | Jev over a **compact structural record** — never the hunk (§4.1) | ~$0.042/1M, ~250 ms | Ranking, risk class, "does this need system 2 at all" |
-| **2** | `graph-reviewer` agent, model tier chosen by risk | **system 2** | Actual reasoning about actual problems |
+| **0** | `skip` globs and whitespace-only hunks (`review.py`); `sensitive` globs force `human+top` | **zero** | Lockfiles, build output, docs, images, whitespace-only edits. **Built:** linters/SAST are not wired in; they are expected to run in CI beforehand. |
+| **1** | Jev over a **compact structural record** — never the hunk (§4.1) | ~$0.042/1M, ~250 ms | Risk class, security surface, and the **route** that picks system 2's model |
+| **2** | `graph-reviewer` agent via `claude -p`, one per bundle | **system 2** | Actual reasoning about actual problems |
 | **1 again** | Jev over each finding — the verdict (§4.2) | ~660 tokens/finding | What *happens* to what system 2 found |
 
-The ladder runs tier 1 **twice**, once on each side of the reasoning: it decides
-what deserves system 2, and then what system 2's output means. System 2 is the
-only expensive rung, so it should do nothing but reason.
+The ladder runs tier 1 **twice**, once on each side of the reasoning: it picks how
+system 2 is run, and then what system 2's output means. System 2 is the only
+expensive rung, so it should do nothing but reason.
+
+**Not built:** the original design let tier 1 resolve a bundle with no system-2
+call at all ("low risk → done"). In the code a low-risk bundle still gets a
+review; it only becomes eligible for the cheap model.
 
 Tier 0 is not a formality. On a typical PR a large share of hunks are generated files,
 lockfiles, imports and formatting. Every one resolved for free never reaches either model.
 
-**Model tiering inside tier 2** is a pure cost lever the baseline does not use:
+**Model tiering inside tier 2** is a cost lever the baseline does not use. As built
+(`system1.route()`, evaluated top-down; every absence of signal escalates):
 
-| Risk | Model | Effort |
+```mermaid
+flowchart TD
+    S{"sensitive path?"} -->|yes| H["human+top"]
+    S -->|no| OK{"tier 1 ok?"}
+    OK -->|"no (outage)"| F["full"]
+    OK -->|yes| C{"confidence"}
+    C -->|"missing or < 0.70"| H
+    C -->|">= 0.70"| R{"risk / security"}
+    R -->|"high, or any security concern"| H
+    R -->|"low and conf >= 0.95"| L["light"]
+    R -->|otherwise| F
+
+    style H fill:#fde8e8,stroke:#d93025
+    style L fill:#e6f4ea,stroke:#137333
+```
+
+| Route | Model (`agent.py`) | Human |
 |---|---|---|
-| medium | cheap tier | `low` |
-| high | top tier | `high` |
-| sensitive path (§8) | top tier | `max`, plus a human |
+| `human+top` | `opus` | yes — any sensitive bundle makes `agent.py` exit 1 |
+| `full` | `opus` | no |
+| `light` | `--cheap-model` (default `opus`) | no |
+
+`--cheap-model` defaults to `opus` because the development account cannot reach
+`sonnet`, so **the tiering lever is built but inert** until a cheaper model is
+configured. `agent.py` prints a note on stderr when `light` bundles ran at full
+cost. There is no per-route `effort` setting.
 
 ### 4.1 System 1 is a swappable slot
 
@@ -207,17 +415,31 @@ of tier-1 calls small. Budget it explicitly in §10 rather than assuming it disa
 state budget. Jev's context limit is unknown to us, so it may not be *forced* — but it is
 kept, for three reasons that stand on their own:
 
+The record `system1.features()` actually sends (about 70 tokens, one per bundle):
+
 ```python
 state = {
-  "change": "UpdateFolderAccessProcess.setup()  +12/-3",
-  "entry_point": "none",           # annotation scan, tier 0
-  "callers": "14 (EXTRACTED)",
-  "communities_crossed": 2,
-  "calls_into": "auth.TokenValidator",
-  "tests_touching": 2,
-  "linters": "clean",
+  "change": "ImportEventOrchestrator.java, ... (6 hunks)",   # file basenames, hunk count
+  "package": "src/main/java/com/acme/orders/migration",
+  "symbols": ".safeCache(), .receiveMessage()",             # up to 8 labels
+  "entry_point": "@ObservesAsync",                           # source annotation scan
+  "max_callers": "2",                                        # or "unknown"
+  "unknown_callers": 4,
+  "covering_tests": 0,
+  "sensitive_path": "yes",
+  "found_in_graph": "yes",
 }
 ```
+
+Two questions are asked of it, both as `choice` (the one primitive that is correct on
+Jev and Laya): *which risk level* (`low | medium | high`) and *which security surface*
+(`none | authz | input | secrets`). `tests_missing` and `needs_deep_review` were
+dropped: the first is a tier-0 fact, the second is just `risk != low`.
+`_no_source()` raises if `@@` or a newline appears in the serialised record, so diff
+text cannot reach the vendor even by accident.
+
+Key lookup order is environment, then `.env` beside `system1.py`, then (Windows only)
+the user registry where `setx` writes. A custom `SYSTEM1_URL` needs no key.
 
 1. **Confidentiality — the strongest reason.** Jev is a closed external API. This record
    sends *structure*, not source: no diff, no function bodies, no business logic. On a
@@ -248,12 +470,32 @@ pre-emptively code around another vendor's bugs.
 System 2 reasons; it does not decide. Once findings exist, each one goes back to
 tier 1 as a flattened record (`severity_claimed`, `scope`, `reviewer_confidence`,
 `summary`, `failure`, `sensitive_path`) and tier 1 returns `block | fix | note`.
-`agent.py` applies that choice, and the exit code follows it.
+`agent.py adjudicate()` applies that choice, and the exit code follows it. With
+`--no-verdict` the reviewer's severity is mapped directly (`blocker→block`,
+`should_fix→fix`, `nitpick→note`), using the same fallback and the same clamp.
 
 The reason is drift. A merge gate keyed on whichever adjective a reasoning model
 reached for this run is not a gate — rephrase a finding and the build flips. A
 cheap classifier over a fixed-shape record is reproducible, costs ~660 tokens per
 finding, and is the same primitive already trusted for routing.
+
+```mermaid
+flowchart TD
+    F["finding from system 2"] --> REC["flatten to record:<br/>severity_claimed, scope, confidence,<br/>summary, failure, sensitive_path"]
+    REC --> J{"tier 1 reachable<br/>and conf >= 0.70?"}
+    J -->|"no"| FB["fall back to reviewer severity<br/>(degrade, never downgrade)"]
+    J -->|"yes"| V["block / fix / note"]
+    V --> C{"scope = pre_existing?"}
+    C -->|"yes"| N["clamp: never block"]
+    C -->|"no"| K["keep verdict"]
+    FB --> X["exit code"]
+    N --> X
+    K --> X
+
+    style J fill:#fef3e8,stroke:#f4a142
+    style N fill:#e6f4ea,stroke:#137333
+    style FB fill:#fde8e8,stroke:#d93025
+```
 
 Two rules stay in code, not in the model, because they are already known (§4):
 
@@ -274,68 +516,94 @@ record determines, and defers what the record does not.
 
 ## 5. The agent
 
-`.claude/agents/graph-reviewer.md` — the whole agent is a prompt with a fact block.
+`agents/graph-reviewer.md` — a prompt plus a tool grant. About 130 lines; no code.
 
 ```markdown
 ---
 name: graph-reviewer
-description: Reviews one risk-ranked hunk bundle with its graph neighborhood
-             served as facts. Does not explore the repo.
-tools: Read, Bash
+description: Reviews ONE risk-ranked hunk bundle with its graph neighbourhood
+             supplied as facts. Does not explore the repository. Returns JSON.
+tools: Read
+---
+```
+
+The body does five things:
+
+1. **Declares the facts resolved.** "Do not go looking for callers, callees or
+   tests. They are given." Backed structurally: the agent has `Read` and **no search
+   tool**, so the instruction cannot be ignored.
+2. **Teaches how to read the facts.** `callers: <n>` is a floor (found edges only);
+   `callers: "unknown"` is *unmeasured*, not zero; `entry_point_annotations` come
+   from source and mean the runtime invokes the symbol; `match_precision: "file"`
+   means the line is unreliable; `in_graph: false` means no structural facts exist;
+   `risk_hint` is an ordering prior, to be ignored when forming a judgement.
+3. **Lists what to look for.** Correctness, security, concurrency, data access,
+   breaking changes, test coverage, and **unneeded complexity the diff introduces**
+   (single-implementation interfaces, pass-through wrappers, constant parameters).
+   Complexity findings default to `nitpick` and use the same `callers` facts.
+4. **Sets rules.** Report everything including uncertain findings (a later step
+   ranks and filters); ground every finding in the diff or a fact; no style
+   comments; state a concrete failure; set `scope` to `introduced` or
+   `pre_existing`, defaulting to `introduced` when unsure.
+5. **Fixes the output shape**, a bare JSON array:
+
+```json
+{"file": "...", "line": 42,
+ "category": "correctness | security | concurrency | data-access | breaking-change | test-coverage | complexity",
+ "severity": "blocker | should_fix | nitpick",
+ "scope": "introduced | pre_existing",
+ "summary": "...", "failure_scenario": "...", "grounded_in": "...",
+ "confidence": 0.0}
+```
+
+Three things carry the design:
+
+1. **Withholding the search tool** is what kills `S_explore`. It only works because the
+   facts are genuinely there — otherwise the agent is blinded, not focused.
+2. **Self-scoring in the same call** (`confidence`, `severity`, `scope`) deletes a
+   downstream scoring stage. The agent holds the diff and the neighbourhood; a separate
+   scorer would see only the comment. Those fields are exactly what tier 1 later
+   flattens into the verdict record (§4.2).
+3. **The agent sees `id, package, sensitive, facts, hunks` and nothing from tier 1.**
+   `agent.py KEYS` excludes `triage` and `route`, so system 1 cannot anchor system 2.
+   The original design passed system-1 "hints" as claims to verify; **that was not
+   built**, and the isolation is the simpler, safer choice.
+
 ---
 
-You review ONE bundle of related changed hunks.
+## 6. The scripts
 
-Structural facts below are DETERMINISTIC and already resolved. Do not grep
-or search for callers, callees or tests — they are given. Read a file only
-when a fact block points you at one and you need the body to decide.
+`review.py` builds the bundles; `agent.py` runs system 2 and applies the verdict.
+Everything else is prompt, config or an existing tool.
 
-## Facts (found edges only)
-{callers, callees, community, covering tests, entry-point annotations}
-
-## Hints (unverified, from system 1)
-{e.g. "possible authz issue, p=0.81"} — confirm or refute each explicitly.
-
-## Review for
-correctness · security · concurrency · data access · breaking change ·
-test coverage
-
-## Output
-For each finding: file, line, one-sentence defect, concrete failure
-scenario (inputs/state -> wrong output), and severity.
-Then score your own finding: grounded_in_diff, actionable, severity.
-Drop anything you cannot ground in the diff or the facts.
+```mermaid
+flowchart TD
+    DIFF["unified diff"] --> PH["diffparse.parse_hunks"]
+    PH --> T0{"skip glob or<br/>whitespace-only?"}
+    T0 -->|yes| DROP["dropped (reason recorded)"]
+    T0 -->|no| PK["group by package directory"]
+    PK --> CH["sort by (path, start)<br/>chunk by --max-bundle (12)"]
+    CH --> MAP["map hunks to graph nodes<br/>line, else file, else none"]
+    CH --> ENT["scan source for entry annotations"]
+    MAP --> FACTS["facts: symbols, callers, callees,<br/>covering_tests, in_graph"]
+    ENT --> FACTS
+    FACTS --> RANK["rank() = risk_hint + basis"]
+    RANK --> T1["tier 1 triage + route<br/>(unless --no-system1)"]
+    T1 --> OUT["bundles.json"]
 ```
 
-Three things carry the design here:
+**Bundling matters more than it looks.** Hunks in one package are *one* review with one
+shared fact block, not several reviews that each re-derive the same context. A cap of
+`--max-bundle` hunks (default 12) bounds the size, because each bundle is one `claude -p`
+call that pays its own cold cache write (measured at 24% of subagent tokens), so coarse
+beats fine.
 
-1. **"Do not grep"** is the instruction that kills `S_explore`. It only works because the facts are genuinely there — otherwise the agent is blinded, not focused.
-2. **Hints arrive as claims to verify**, never conclusions, so system 1 cannot quietly anchor system 2.
-3. **Self-scoring in the same call** deletes a whole downstream stage. The agent holds the diff and the neighborhood; a separate scorer would see only the comment.
+`rank()` is a deterministic prior, not a model score: sensitive path +100, entry
+point +25, unknown fan-in +10 per kind, max measured fan-in (capped 25), no covering
+tests +10, not in graph +5, plus one per hunk. It ships with its basis string so the
+ordering is explainable.
 
----
-
-## 6. The one script
-
-`review.py` — the only real program. Everything else is prompt, config or an existing tool.
-
-```
-diff --> hunks --> map to graph nodes (§9.1)
-                      |
-                      +-- tier 0 filters          -> resolved, drop
-                      +-- attach facts            -> callers/callees/community/tests
-                      +-- bundle by community     -> related hunks reviewed together, once
-                      +-- rank by risk            -> system 1
-                      |
-                      v
-              JSON: ordered bundles + facts + hints
-```
-
-**Bundling matters more than it looks.** Five hunks in one community touching the same
-function are *one* review with one shared fact block, not five reviews that each re-derive
-the same context. This is a second, independent cut at the `D × S_diff` term.
-
-Output is plain JSON on stdout. The agent layer consumes it. No service, no queue, no DB.
+Output is plain JSON on stdout. No service, no queue, no DB.
 
 ---
 
@@ -356,8 +624,9 @@ A reviewer told *"this function has 14 callers, 3 in the auth community, covered
 actually finds those bugs.
 
 So the trade is: **fewer agents, each much better informed.** Where lens diversity still
-earns its keep — high-risk bundles, where disagreement is itself the signal — §3 escalates
-to a second independent reviewer.
+earns its keep — high-risk bundles, where disagreement is itself the signal — the
+intended fix is a second independent reviewer. **Not built:** today every bundle gets
+exactly one reviewer.
 
 **This is a hypothesis with a clear failure mode**: if bundle-level review with facts has
 worse recall than dimension fan-out, the benchmark in §10 will show it, and the fix is to
@@ -367,20 +636,25 @@ restore lens fan-out *on high-risk bundles only* — keeping the cost win everyw
 
 ## 8. Guardrails
 
-- **Hard overrides.** Auth, migrations, RLS and payment paths get the top model *and* a
-  human, whatever any score says. Path globs, no model, tier 0. Cheapest and highest-value
-  rule in the system — build it first.
-- **Found edges only.** `EXTRACTED` edges are facts; `INFERRED` edges are soft hints to
-  system 2 and never inputs to system 1.
-- **No zero-means-safe.** Any absent graph signal is `unknown`, never a low-risk value.
-  §9.2 is the reason this rule exists.
-- **Graph freshness.** Verify the graph matches the PR head SHA before the run. A stale
-  graph degrades every signal downstream with no error.
-- **Deterministic stays deterministic.** Formatting, CVEs and known patterns never reach a
-  model.
-- **Feedback loop.** Log human accept/dismiss per comment and whether merged PRs later
-  caused bugs. This is the only thing that calibrates system 1 to this codebase — and the
-  only honest source of the quality number in §10.
+Each guardrail is marked with where it lives.
+
+- **Hard overrides.** *Built.* `[sensitive]` globs in `overrides.toml` set
+  `bundle.sensitive`; `route()` returns `human+top` regardless of any score, and
+  `agent.py` exits 1 while any sensitive bundle exists. Path globs, no model.
+- **Found edges only.** *Built* in `Graph.__init__`: non-`EXTRACTED` edges are skipped
+  entirely. They are not currently passed to system 2 as soft hints either.
+- **No zero-means-safe.** *Built.* Fan-in 0 is emitted as `"unknown"` (`review.py`);
+  tier-1 outage routes to `full`; low confidence routes to `human+top`; a missing key
+  fails loudly (exit 2) instead of silently skipping triage.
+- **Degrade, never downgrade.** *Built.* Tier 1 down or confidence < 0.70 on a verdict
+  falls back to the reviewer's own severity.
+- **Graph freshness.** *Not enforced in code.* The `graph-review` skill instructs the
+  user to check the graph post-dates the base commit; `review.py` only checks that the
+  file exists. A stale graph silently demotes matches from line to file precision.
+- **Deterministic stays deterministic.** *Partly built.* Skip-globs and whitespace-only
+  hunks never reach a model. Linters, CVE and SAST checks are assumed to run in CI.
+- **Feedback loop.** *Not built.* Logging accept/dismiss per comment is still the only
+  honest source of a quality number, and the only thing that would calibrate tier 1.
 
 ---
 
@@ -544,11 +818,14 @@ Two further caveats:
 
 ```bash
 python bench.py prepare --bugs Lang:1,Math:5 --out tasks/     # needs defects4j on PATH
+python bench.py prepare-git --repo . --shas <fix-sha>,... --out tasks/   # own history, no download
 # ... run each arm, emit <bug>.json per task ...
-python bench.py score --tasks-dir tasks/ --findings-dir out/graph/
-python bench.py score --tasks-dir tasks/ --findings-dir out/baseline/
-python bench.py selftest                                      # no defects4j needed
+python bench.py score --tasks-dir tasks/ --findings-dir out/graph/ --tolerance 5
+python bench.py score --tasks-dir tasks/ --findings-dir out/baseline/ --tolerance 5
 ```
+
+`prepare-git` is the cheap path and has been run (5 fix commits). It saturated; see
+[benchmark.md](benchmark.md) for why, and always sweep `--tolerance`.
 
 `bench.py` does **not** invoke the arms. It prepares tasks and grades answers, so it stays
 neutral between them and runnable on its own. Metrics it reports per arm:
@@ -591,28 +868,37 @@ rather than step 7.
 
 | File | Lines | Purpose |
 |---|---|---|
-| `review.py` | 411 | diff → hunks → facts → bundles → ranked JSON. **The only real program.** |
-| `bench.py` | 251 | Defects4J task prep + localization scoring (§10.1) |
-| `system1.py` | 227 | `POST /v1/systemone` client. The swap seam (§4.1). |
-| `diffparse.py` | 160 | Unified-diff parsing, shared by review + bench |
-| `.claude/agents/graph-reviewer.md` | 82 | The agent. Prompt, not program. |
-| `.claude/skills/graph-review/SKILL.md` | 75 | Entry point: run `review.py`, dispatch agents |
-| `setup-defects4j.sh` | 65 | One-time benchmark toolchain install |
+| `review.py` | 260 | diff → hunks → facts → bundles → tier-1 triage → ranked JSON |
+| `agent.py` | 217 | bundles → one `claude -p` per bundle → findings → tier-1 verdict → exit code |
+| `system1.py` | 232 | `POST /v1/systemone` client, questions, `route()`. The swap seam (§4.1). |
+| `diffparse.py` | 73 | Unified-diff parsing, shared by review + bench |
+| `bench.py` | 190 | Task prep (Defects4J, git history) + localization scoring (§10.1) |
+| `ensure.py` (+ `.sh`, `.ps1`) | 229 | Preflight: key, `claude`, Python, `graphify`, `git`; `--deep` probes live |
+| `test_agent.py` | 40 | Self-check for the merge-gate fallback logic |
+| `agents/graph-reviewer.md` | 130 | The agent. Prompt and `tools: Read`, not program. |
+| `skills/graph-review/SKILL.md` | 103 | Interactive entry: check graph, run `review.py`, run `agent.py`, report |
 | `overrides.toml` | 36 | Tier-0 sensitive / skip / test globs |
+| `setup-defects4j.sh` | 65 | One-time benchmark toolchain install |
 
-Larger than the original estimate, and the excess is almost entirely
-`selftest()` — every module carries a runnable self-check, and `system1.py`'s
-asserts that **no source code can reach the external API**.
+Line counts are as of the 0.2.0 tree. The only runnable self-check is
+`test_agent.py`, covering the merge-gate fallback; `bench.py` has no `selftest`.
 
-### Built, with two deviations from this document
+### Built, with deviations from this document
 
 1. **Bundling is by package directory, not Graphify community.** The real graph
    ships no community data — `hyperedges` is empty and clustering was never run.
    For Java the package *is* the module boundary, so this is free, deterministic
    and drops a dependency on an optional Graphify feature.
-2. **The agent gets `tools: Read` and no search tool.** §5 stated "do not grep"
-   as an instruction; withholding the tool enforces it structurally. Stronger and
-   smaller.
+2. **The agent gets `tools: Read` and no search tool.** The first design stated
+   "do not grep" as an instruction; withholding the tool enforces it structurally.
+3. **System 2 runs through `claude -p`, one subprocess per bundle**, on the
+   subscription, not an API key. The only API key in the system is the tier-1 one.
+4. **Tier 1 adjudicates, it does not gate or verify.** It routes the model and
+   assigns a verdict. There is no "skip the bundle" path and no verifier stage.
+5. **No hints to the reviewer.** `triage`/`route` are not part of the agent's input.
+6. **Graph edges: both key names.** `graphify update --no-cluster` writes `links`,
+   clustered graphs write `edges`; `Graph` reads either. Reading only one yields a
+   graph with every node and no relationships, with no error.
 
 ### What the first real run showed
 
@@ -644,7 +930,7 @@ Three defects surfaced only because the run used a real repo and a real graph:
   string-literal guard — collapsing whitespace inside `"a  b"` would silently
   drop a real change.
 
-Tier-1 degradation is verified: with the endpoint unreachable the run exits 0,
+Tier-1 degradation is verified: with the endpoint unreachable `review.py` exits 0,
 reports `system1_ok: 0/4`, and routes every bundle to `full` or `human+top`.
 **Nothing downgrades to `light` on failure.**
 
@@ -672,6 +958,12 @@ CI, the agent runtime, `ReportFindings`.
 - **Does ~250 ms × N calls fit the time budget?** The wall-clock goal assumes tier 0 and
   bundling keep tier-1 call volume low. Measure it at step 6; if it dominates, batch the
   calls or move ranking to tier 0 heuristics.
-- **Bundling granularity.** Community-level may be too coarse on large communities. Needs a
-  size cap, tuned on the bench.
+- **Bundling granularity.** Package-level with a `--max-bundle 12` cap, chosen to amortise
+  the per-call cache write. Untuned against recall; the bench has not yet been able to
+  discriminate (benchmark.md).
+- **Is a verifier needed after all?** Lever 3 was redesigned from "verify suspicious
+  findings" to "classify every finding cheaply". Nothing re-checks a finding's truth, so a
+  confident false positive from system 2 passes straight to the verdict.
+- **When does the cheap model turn on?** The `light` route needs confidence ≥ 0.95 and
+  risk `low`; no bundle has cleared it yet, and the account cannot reach a cheaper model.
 - **Target service.** §9 measures `acme-orders`. A non-CDI codebase changes §9.2 substantially.
