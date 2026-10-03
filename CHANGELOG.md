@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.3
+
+### Fixed — tier 1 was gating on the wrong confidence field
+
+Investigated a real run where every one of 54 tier-1 verdict calls fell
+back to `fallback:low-confidence` despite Laya answering every question.
+Laya's response carries two confidence-shaped fields that disagree:
+`answer_confidence` (`== probabilities[chosen]`, the standard notion of
+"how sure is the picked answer") and `confidence` (a separate, opaque
+number that collapses toward 0 on anything but a near-certain top choice).
+`system1.py` was reading `confidence`.
+
+Measured live, on real calls, `confidence` vs. the `answer_confidence` it
+should have read: 0.0464 vs 0.4475 on a risk triage call, 0.1885 vs 0.6415
+on a verdict call. This explains most of what earlier measurements
+recorded as "Laya's confidence is 0.03–0.07" — that was substantially this
+bug, not only Laya being weak zero-shot.
+
+`system1._confidence()` now reads `answer_confidence` first, falling back
+to `confidence` only when the key is genuinely absent (not just `null` —
+a real edge case found by dogfooding this exact fix with `graph-reviewer`,
+along with the missing test coverage for both the fallback and the
+triage()/verdict() integration, both now fixed and pinned in
+`test_system1.py`).
+
+**Not changed:** the `route()` thresholds (0.70, 0.95). They were always
+meant to gate on a sane confidence signal, which this is now actually
+closer to — but more bundles will clear them than before, which is a real
+production behaviour change worth watching, not something to assume
+correct without re-measuring. `docs/architecture.md` §4.1 has the full
+numbers.
+
 ## 0.4.2
 
 ### Fixed — a large bundle could crash `agent.py` on Windows

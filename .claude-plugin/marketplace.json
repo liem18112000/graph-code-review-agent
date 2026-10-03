@@ -3,14 +3,14 @@
   "owner": { "name": "liem18112000", "url": "https://github.com/liem18112000" },
   "metadata": {
     "description": "Graph-grounded code review agent: deterministic facts first, cheap triage second, reasoning model last.",
-    "version": "0.4.2"
+    "version": "0.4.3"
   },
   "plugins": [
     {
       "name": "graph-code-review-agent",
       "source": "./",
       "description": "Graph-grounded code review. Serves callers/callees/tests as facts so the reviewer never greps, triages every change through a fast classifier, and routes only what earns it to the top model.",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "category": "development",
       "keywords": ["code-review", "code-graph", "graphify", "triage", "agent"]
     }

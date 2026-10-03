@@ -500,6 +500,41 @@ actually being fine-tuned against this codebase's history:
 Whether these apply to Jev is unknown — they are Laya-specific findings. Do not
 pre-emptively code around another vendor's bugs.
 
+**Resolved in 0.4.3 — "gate on confidence" was ambiguous, and we were gating on
+the wrong field.** Laya's real response carries two confidence-shaped fields,
+and they disagree: `answer_confidence` (== `probabilities[chosen]`, the
+intuitive "how sure is the picked answer" signal) and `confidence` (a separate,
+opaque number that collapses toward 0 on anything but a near-certain top
+choice). `system1.py` was reading `confidence`. Measured live, on real calls:
+
+| Call | `confidence` (read) | `answer_confidence` (should've been read) |
+|---|---|---|
+| Risk triage, 20/45/36 split | 0.0464 | 0.4475 |
+| Security surface, 98/0/1/0 split | 0.9243 | 0.9821 |
+| Verdict, 64/14/22 split | 0.1885 | 0.6415 |
+
+The model card's "gate on confidence (AUROC 0.77)" advice (above) almost
+certainly meant the second one — the chosen-answer probability is the standard
+notion of confidence for a classifier, and it is the one that actually varies
+sanely with how peaked the distribution is. Reading the literal field named
+`confidence` instead explains most of what §10/call-flow.md measured as
+"Laya's confidence is 0.03–0.07, far under the 0.70 floor": that was this bug,
+not (only) Laya being weak zero-shot. `system1._confidence()` now reads
+`answer_confidence` first, falling back to `confidence` only when the former
+key is genuinely absent — kept as a fallback for a vendor whose shape differs
+(Jev's is still unverified).
+
+**This does not mean Laya is now well-calibrated.** Re-measured after the fix,
+the same four findings scored 0.40–0.78 instead of 0.06–0.41 — a real, large
+improvement, but two of the four still didn't clear 0.70. Laya zero-shot is
+still weak (§4.1's own table above); this fix removed a self-inflicted
+multiplier on that weakness, it did not remove the weakness itself. The
+`route()`/verdict-acceptance thresholds (0.70, 0.95) are unchanged — they were
+always meant to gate on a sane confidence signal, which this is now actually
+closer to — but more bundles will clear them than before, and that is a real
+production behaviour change worth watching, not something to assume is
+correct from reasoning alone.
+
 ### 4.2 System 1 also closes the loop — the verdict
 
 System 2 reasons; it does not decide. Once findings exist, each one goes back to

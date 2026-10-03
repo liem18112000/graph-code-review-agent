@@ -140,6 +140,24 @@ def flat(s: object, n: int = 240) -> str:
     return " ".join(str(s or "").split())[:n]
 
 
+def _confidence(answer: dict) -> float | None:
+    """Laya's response carries TWO confidence-shaped fields, and they are not
+    close: `answer_confidence` == probabilities[chosen] (the intuitive "how
+    sure is the picked answer" signal); `confidence` is a separate, opaque
+    number that collapses toward 0 on anything but a near-certain top choice
+    (measured live: 0.0464 on a 20/45/36 split, 0.1885 on a 64/14/22 split,
+    while `answer_confidence` tracked the top probability both times). Every
+    gate in this file means the intuitive one. `confidence` is kept as a
+    fallback only for a vendor that doesn't expose `answer_confidence`
+    (Jev's exact response shape is unverified -- see §4.1). `answer_confidence`
+    may be explicitly null rather than absent -- `dict.get(k, default)` would
+    return that null, not the default, so the fallback is written to check the
+    value, not just key presence. `0.0` is a real, legitimate confidence and
+    must not trigger the fallback either, which rules out `or`."""
+    ac = answer.get("answer_confidence")
+    return ac if ac is not None else answer.get("confidence")
+
+
 def verdict(f: dict, sensitive: bool = False) -> dict:
     """Tier 1 adjudicates a tier-2 finding. Never raises -- an outage must
     leave the caller free to fall back to the reviewer's own severity."""
@@ -155,7 +173,7 @@ def verdict(f: dict, sensitive: bool = False) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "usage": {}}
     a = (raw.get("answers") or {}).get(Q_VERDICT) or {}
     return {"ok": True, "verdict": a.get("choice"),
-            "confidence": a.get("confidence"), "usage": raw.get("usage") or {}}
+            "confidence": _confidence(a), "usage": raw.get("usage") or {}}
 
 
 def features(b: dict) -> dict:
@@ -217,8 +235,9 @@ def triage(bundle: dict, **kw) -> dict:
     sec = got(Q_SEC).get("choice")
     return {"ok": True,
             "risk": got(Q_RISK).get("choice"),
-            # gate on confidence: act_probability is anti-correlated on Laya
-            "confidence": got(Q_RISK).get("confidence"),
+            # gate on answer_confidence, not confidence (see _confidence());
+            # act_probability is a third, separate field and anti-correlated on Laya
+            "confidence": _confidence(got(Q_RISK)),
             "security_concern": None if sec in ("none", None) else sec,
             "usage": raw.get("usage") or {},     # input_tokens / output_tokens
             "model": raw.get("model"),
@@ -226,7 +245,20 @@ def triage(bundle: dict, **kw) -> dict:
 
 
 def route(t: dict, sensitive: bool) -> str:
-    """§7 routing. Every absence of signal escalates -- unknown is not safe."""
+    """§7 routing. Every absence of signal escalates -- unknown is not safe.
+
+    0.70 / 0.95 were never tuned against a measured distribution; they are
+    the obvious "fairly sure" / "very sure" points on a 0-1 scale. Before the
+    `_confidence()` fix they were being compared against a field
+    (`confidence`) that collapsed toward 0 on anything but a near-certain
+    answer, so these thresholds were effectively much stricter than they
+    read. Reading `answer_confidence` instead raised measured values by
+    roughly 5-10x on the same real calls (e.g. 0.19 -> 0.64). The thresholds
+    are unchanged here because they were always meant to gate on a sane
+    confidence signal, which this is now closer to -- but this is a real
+    behaviour change in production (more bundles will clear `light`/pass the
+    verdict gate) and is worth watching, not assumed correct from reasoning
+    alone."""
     conf = t.get("confidence")
     if sensitive:
         return "human+top"
