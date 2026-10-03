@@ -15,3 +15,6 @@ graphify-out/
 .d4j/
 tasks/
 out/
+
+# local operational data -- per-machine, not shared via the repo
+feedback.jsonl

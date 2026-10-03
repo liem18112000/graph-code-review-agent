@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Replay harness (docs/architecture.md §10, §10.1).
 
-    prepare   Defects4J bug  ->  review task (inverse patch + executable truth)
-    score     findings JSON  ->  localization metrics
+    prepare-git   fix commit  ->  review task (inverse patch, no Defects4J needed)
+    score         findings JSON  ->  localization metrics
 
 Does NOT invoke the arms, so it stays neutral between them and runs without
-either. Defects4J ships V_buggy and V_fixed differing only in source; diffing
-fixed -> buggy yields a change that *introduces* a known bug, and a triggering
-test proves the bug is real rather than merely annotated.
+either. `prepare-git` diffs a fix commit back to its parent, so the "PR" is
+the change that *re-introduces* the bug that commit fixed, against your own
+history -- §10 calls this the decisive arm.
 
-    python bench.py prepare --bugs Lang:1,Math:5 --out tasks/
+    python bench.py prepare-git --repo . --shas <sha1>,<sha2> --out tasks/
     python bench.py score --tasks-dir tasks/ --findings-dir out/graph/
 """
 from __future__ import annotations
@@ -27,40 +27,13 @@ def _sh(cmd: list[str], **kw) -> str:
     return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw).stdout
 
 
-def prepare_bug(pid: str, bid: str, work: Path) -> dict:
-    fixed, buggy = work / f"{pid}-{bid}f", work / f"{pid}-{bid}b"
-    for v, d in ((f"{bid}f", fixed), (f"{bid}b", buggy)):
-        _sh(["defects4j", "checkout", "-p", pid, "-v", v, "-w", str(d)])
-    src = _sh(["defects4j", "export", "-p", "dir.src.classes", "-w", str(fixed)]).strip()
-
-    # fixed -> buggy INTRODUCES the bug. --no-index exits 1 on difference.
-    diff = subprocess.run(["git", "diff", "--no-index", "--unified=3",
-                           f"{fixed.name}/{src}", f"{buggy.name}/{src}"],
-                          cwd=work, capture_output=True, text=True).stdout
-
-    truth: dict[str, list[int]] = {}
-    for h in parse_hunks(diff):
-        p = h.path
-        for pre in (buggy.name, fixed.name):            # drop the checkout dir
-            if p.startswith(pre + "/"):
-                p = p[len(pre) + 1:]
-        truth.setdefault(p, []).extend(h.touched)
-
-    return {"bug": f"{pid}-{bid}", "dataset": "defects4j",
-            "base_checkout": str(fixed),      # graph builds here, as the hook would
-            "head_checkout": str(buggy), "diff": diff,
-            "ground_truth": {k: sorted(set(v)) for k, v in truth.items()},
-            "triggering_tests": _sh(["defects4j", "export", "-p", "tests.trigger",
-                                     "-w", str(buggy)]).split()}
-
-
 def prepare_git(repo: Path, sha: str, work: Path) -> dict:
     """Build a task from a real fix commit -- no Defects4J needed.
 
-    Same inversion as prepare_bug: diff the FIXED tree back to its parent, so the
-    'PR' is the change that introduces the bug the commit fixed. Ground truth is
-    what the fix touched. Weaker than Defects4J (no triggering test) but it runs
-    against your own history, which §10 calls the decisive arm.
+    Diff the FIXED tree back to its parent, so the 'PR' is the change that
+    introduces the bug the commit fixed. Ground truth is what the fix
+    touched. Weaker than an executable benchmark (no triggering test) but it
+    runs against your own history, which §10 calls the decisive arm.
     """
     g = lambda *a: _sh(["git", "-C", str(repo)] + list(a))
     subject = g("log", "-1", "--format=%s", sha).strip()
@@ -116,14 +89,29 @@ def _load(p: Path, key: str | None = None):
     return d.get(key, []) if key and isinstance(d, dict) else d
 
 
+def selftest() -> int:
+    """No defects4j, no network, no filesystem writes -- proves score_one()
+    and aggregate() on synthetic data, so a regression there fails loudly
+    instead of waiting for a real benchmark run to notice."""
+    task = {"bug": "X-1", "ground_truth": {"a/Foo.java": [10, 11, 40]}}
+    hit = score_one(task, [{"file": "a/Foo.java", "line": 12}], tol=5)
+    assert hit == {"bug": "X-1", "localized": True, "rank_of_first_hit": 1,
+                   "findings_total": 1, "findings_hit": 1}, hit
+    miss = score_one(task, [{"file": "a/Foo.java", "line": 100}], tol=5)
+    assert miss["localized"] is False and miss["rank_of_first_hit"] is None, miss
+    suffix = score_one(task, [{"file": "pkg/a/Foo.java", "line": 10}], tol=0)
+    assert suffix["localized"] is True, "suffix-wise path match should still hit"
+    agg = aggregate([hit, miss])
+    assert agg["bugs"] == 2 and agg["localization_rate"] == 0.5, agg
+    print("ok")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("prepare")
-    p.add_argument("--bugs", required=True, help="comma list, e.g. Lang:1,Math:5")
-    p.add_argument("--out", type=Path, default=Path("tasks"))
-    p.add_argument("--work", type=Path, default=Path(".d4j"))
+    sub.add_parser("selftest", help="synthetic self-check, no network needed")
     q = sub.add_parser("prepare-git", help="tasks from real fix commits in a repo")
     q.add_argument("--repo", type=Path, required=True)
     q.add_argument("--shas", required=True, help="comma list of fix-commit SHAs")
@@ -136,6 +124,9 @@ def main() -> int:
     s.add_argument("--tolerance", type=int, default=5)
     a = ap.parse_args()
 
+    if a.cmd == "selftest":
+        return selftest()
+
     if a.cmd == "prepare-git":
         a.out.mkdir(parents=True, exist_ok=True)
         for sha in a.shas.split(","):
@@ -146,24 +137,6 @@ def main() -> int:
             (a.out / f"{t['bug']}.json").write_text(json.dumps(t, indent=2),
                                                     encoding="utf-8")
             print(f"{t['bug']}  files={len(t['ground_truth'])}  {t['subject'][:58]}")
-        return 0
-
-    if a.cmd == "prepare":
-        a.out.mkdir(parents=True, exist_ok=True)
-        a.work.mkdir(parents=True, exist_ok=True)
-        for spec in a.bugs.split(","):
-            pid, bid = spec.strip().split(":")
-            try:
-                task = prepare_bug(pid, bid, a.work.resolve())
-            except FileNotFoundError:
-                print("defects4j not on PATH -- run setup-defects4j.sh", file=sys.stderr)
-                return 2
-            except subprocess.CalledProcessError as e:
-                print(f"{pid}-{bid}: {e.stderr.strip()[:200]}", file=sys.stderr)
-                continue
-            dest = a.out / f"{pid}-{bid}.json"
-            dest.write_text(json.dumps(task, indent=2), encoding="utf-8")
-            print(f"{dest}  files={len(task['ground_truth'])}")
         return 0
 
     if a.tasks_dir:

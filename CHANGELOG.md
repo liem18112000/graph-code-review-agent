@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.4.0
+
+### Added — every "Not built" row in the design doc that was safe to build
+
+Eight items, each verified individually and through the real pipeline (real
+`graphify` graph, real local Laya, real `claude -p`):
+
+- **Graph freshness, enforced.** `graph.json` already carried a
+  `built_at_commit` stamp nothing read; `review.py` now compares it to the
+  repo's actual HEAD and warns loudly on stderr instead of silently degrading
+  match precision.
+- **`path_to_sensitive`, fixed (§9.3).** The original `graphify path` walked
+  all relation types, undirected, through test files — noise. Replaced with
+  `Graph.hops_to_sensitive()`: directed `calls` edges only, test files
+  excluded, capped at 4 hops. A bundle one call away from a sensitive path now
+  gets a `rank()` bonus instead of nothing.
+- **System-1 hints to the reviewer.** `agent.py hints_for()` crosses over
+  `risk` and `security_concern` only — never `route`, never the confidence
+  value — each phrased as a claim the agent prompt must confirm or refute,
+  never a conclusion it inherits.
+- **Opt-in linter/SAST wiring.** `review.py --run-linters` shells out to
+  `[[linters]]` configured in `overrides.toml`, once per matching file among
+  the surviving hunks. Results carry a verdict already and skip both models
+  entirely (`agent.py lint_findings_from()`).
+- **Feedback loop.** `feedback.py log`/`stats`, append-only JSONL, no server —
+  logs human accept/dismiss per finding and reports accept rate by category,
+  severity, and whether tier 1's own verdict or the fallback mapping was used.
+- **Queue-level PR ranking**, since `graphify prs --triage` does not exist in
+  the installed graphify. `rank_queue.py` reuses `review.py`'s own `build()`
+  per ref against a common base — no new ranking logic.
+- **An MCP server**, since graphify's own MCP mode does not exist either.
+  `mcp_server.py` is a hand-rolled stdio JSON-RPC server, stdlib only,
+  exposing `review_diff` and `rank_queue` as tools.
+- **`bench.py selftest`**, synthetic, no `defects4j` or network needed.
+
+**Deliberately left not-built:** tier-1 skip-on-low-risk, a separate verifier
+stage, and a second reviewer on high-risk bundles. All three are gated on
+benchmark evidence §7/§10/§12 say doesn't exist yet — building them now would
+be resolving an open question by fiat instead of by measuring.
+
+### Removed — the Defects4J benchmark path
+
+`bench.py prepare` / `prepare_bug()` and `setup-defects4j.sh` are gone.
+`prepare-git` was already the primary, decisive arm (§10.1: own history, no
+multi-GB download) and nothing else in this repo depended on the Defects4J
+path. The design discussion of why Defects4J would still be useful as a
+contamination-control arm stays in `docs/architecture.md` — running it now
+just means standing it up by hand, per its own docs, instead of through this
+repo.
+
 ## 0.3.0
 
 ### Added — tier-1 can be self-hosted (Laya) with no API key

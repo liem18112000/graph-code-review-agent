@@ -29,6 +29,24 @@ CHEAP_ROUTES = {"light"}
 KEYS = ("id", "package", "sensitive", "facts", "hunks")
 
 
+def hints_for(bundle: dict) -> list[str]:
+    """Tier 1's triage, reframed as claims to verify -- never as conclusions
+    system 2 inherits. Only `risk` and `security_concern` cross over (never
+    `route`, `confidence` thresholds, or anything that could anchor rather
+    than prompt verification); the agent prompt requires confirming or
+    refuting each explicitly. Empty when tier 1 was down or skipped
+    (--no-system1), so a missing hints key is not itself a signal."""
+    t = bundle.get("triage") or {}
+    if not t.get("ok"):
+        return []
+    conf = t.get("confidence")
+    cs = f"{conf:.2f}" if isinstance(conf, (int, float)) else "unknown"
+    hints = [f"possible risk level: {t['risk']} (system-1 confidence {cs})"] if t.get("risk") else []
+    if sec := t.get("security_concern"):
+        hints.append(f"possible {sec} security surface (system-1 confidence {cs})")
+    return hints
+
+
 def findings_from(stdout: str) -> list[dict]:
     """Pull the findings array out of the agent's reply.
 
@@ -44,8 +62,11 @@ def findings_from(stdout: str) -> list[dict]:
 
 async def review(bundle: dict, cwd: Path, timeout: int, cheap: str) -> list[dict]:
     model = cheap if bundle.get("route") in CHEAP_ROUTES else "opus"
+    payload = {k: bundle[k] for k in KEYS}
+    if hints := hints_for(bundle):
+        payload["hints"] = hints
     proc = await asyncio.create_subprocess_exec(
-        "claude", "-p", json.dumps({k: bundle[k] for k in KEYS}, indent=2),
+        "claude", "-p", json.dumps(payload, indent=2),
         "--agent", AGENT, "--model", model,
         "--output-format", "json",
         "--permission-mode", "dontAsk",           # non-interactive: never block
@@ -103,6 +124,21 @@ async def run(bundles: list[dict], cwd: Path, concurrency: int,
 # was worse still. The split is real, so roughly a third of findings land
 # here -- that is the design working, not a tuning failure.
 FALLBACK = {"blocker": "block", "should_fix": "fix", "nitpick": "note"}
+
+# review.py's optional --run-linters output (§8 "Deterministic stays
+# deterministic"): already a fact, not a claim, so it skips both models --
+# no system-2 review, no tier-1 verdict. Severity vocabulary is the linter's
+# own (error/warning/info), not the reviewer's (blocker/should_fix/nitpick).
+LINT_VERDICT = {"error": "fix", "warning": "note", "info": "note"}
+
+
+def lint_findings_from(doc: dict) -> list[dict]:
+    out = []
+    for lf in doc.get("lint_findings") or []:
+        lf = dict(lf, confidence=1.0, verdict=LINT_VERDICT.get(lf.get("severity"), "note"),
+                  verdict_by="lint")
+        out.append(lf)
+    return out
 
 
 def adjudicate(findings: list[dict], bundles: list[dict]) -> list[dict]:
@@ -193,6 +229,10 @@ def main() -> int:
                 f["verdict"] = "note"
     else:
         v_usage = adjudicate(findings, bundles)
+
+    # lint findings are deterministic and already carry a verdict -- prepend
+    # them, don't run them back through sort/adjudicate's reviewer-severity logic
+    findings = lint_findings_from(doc) + findings
     json.dump({"findings": findings}, sys.stdout, indent=2)
     print()
 

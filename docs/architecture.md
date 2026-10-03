@@ -24,13 +24,29 @@ Shaped as **one agent plus one script**, not an orchestration service.
 > | Tier 0 globs + whitespace filter | **Built** (`review.py`, `overrides.toml`) |
 > | Facts from graph, bundled | **Built**, bundled by *package directory* |
 > | Tier 1 risk triage + routing | **Built**; routes the model and, with `--gate`, reorders the queue |
-> | Tier 1 skips low-risk bundles | **Not built** — every surviving bundle reaches system 2 |
+> | Tier 1 skips low-risk bundles | **Not built, deliberately** — every surviving bundle reaches system 2; skipping it is gated on §7's benchmark proving lever 1 holds quality alone, which it has not yet |
 > | Model tiering (cheap model on `light`) | **Built but inert** — `--cheap-model` defaults to `opus` |
 > | Tier 1 verdict `block/fix/note` | **Built** (`agent.py adjudicate`) |
-> | Separate verifier for suspicious findings | **Not built** |
-> | Second independent reviewer on high-risk bundles | **Not built** |
-> | System-1 hints passed to the reviewer | **Not built** — the reviewer sees facts only |
-> | Graph-freshness check | Manual step in the skill, not enforced in code |
+> | Separate verifier for suspicious findings | **Not built, deliberately** — redesigned away in favour of lever 3 (§2); re-introducing it is an open question (§12), not a forgotten task |
+> | Second independent reviewer on high-risk bundles | **Not built, deliberately** — the mitigation *if* §10's benchmark shows lens fan-out matters; it has not yet discriminated either way |
+> | System-1 hints passed to the reviewer | **Built in 0.3.0** — `agent.py hints_for()` crosses over `risk`/`security_concern` only (never `route` or confidence), framed as claims to confirm or refute (§5.3) |
+> | Graph-freshness check | **Built in 0.3.0** — `review.py graph_freshness()` compares the graph's stamped `built_at_commit` to the repo's actual HEAD and warns loudly on stderr, no longer a manual skill step |
+> | System 1 as a swappable vendor slot, self-hosted with no key | **Built** — one HTTP contract (§4.1); `laya-serve` needs no `TYPESAFE_API_KEY`. **0.3.0 fix:** `review.py` and `ensure.py` both gated the key regardless of `SYSTEM1_URL` until then |
+> | Reviewer flags unneeded complexity (interfaces, wrappers, config nobody varies) | **Built** in 0.3.0 — `category: complexity`, reuses the same `callers` fact that drives risk (§5.3) |
+> | Hard overrides: sensitive path → top model + required human | **Built** (§8) — `overrides.toml [sensitive]`, `route()`, `agent.py` exit 1 |
+> | Found-edges-only guardrail (`INFERRED` edges never reach either model) | **Built** (§8) — dropped in `Graph.__init__`; not even passed to system 2 as a soft hint |
+> | Zero measured callers reported as `unknown`, never treated as safe | **Built** (§8, §9.2) |
+> | Degrade-never-downgrade on tier-1 outage or low confidence | **Built** (§8, §4.2) |
+> | Deterministic stays deterministic — linters/SAST wired into this pipeline | **Built in 0.3.0, opt-in** — `review.py --run-linters` shells out to `[[linters]]` in `overrides.toml`; still zero tokens, still assumes CI may also run these separately |
+> | Feedback loop: log human accept/dismiss per comment | **Built in 0.3.0** — `feedback.py log`/`stats`, append-only JSONL, no server; still the only calibration source for tier 1 once it has data |
+> | `path_to_sensitive`, restricted to directed `calls` edges | **Built in 0.3.0** — `Graph.hops_to_sensitive()`, directed `calls` only, test files excluded, hop-capped (§9.3, fixed) |
+> | Queue-level PR ranking (`graphify prs --triage`) | **Built in 0.3.0, our own equivalent** — `rank_queue.py` reuses `review.py build()` per ref; the graphify flag itself still does not exist in 0.9.27 (§9.5) |
+> | MCP server mode | **Built in 0.3.0, our own equivalent** — `mcp_server.py`, hand-rolled stdio JSON-RPC, stdlib only; graphify's own MCP mode still does not exist (§9.5) |
+> | Benchmark against own git history, no Defects4J download | **Built** — `bench.py prepare-git` (§10.1), run on 5 fix commits |
+> | `bench.py selftest` | **Built in 0.3.0** — synthetic, no defects4j; `test_agent.py`/`test_review.py` remain the dedicated self-checks for the merge gate and graph logic |
+> | Cross-platform preflight reporting which tier-1 mode is configured | **Built** — `ensure.py`/`.sh`/`.ps1`, `--deep` probes the real endpoint |
+> | Tier-1 verdict choice validated against `block\|fix\|note` | **Fixed in 0.3.0** — an unrecognised choice used to pass straight through to the gate |
+> | `--no-verdict` actually affects the exit code | **Fixed in 0.3.0** — it used to leave `verdict` unset on every finding, so blockers always counted zero |
 
 > **Supersedes** the previous revision's §9.5, which argued a flat-rate subscription
 > weakened the case for cheap triage. Token cost is now an explicit goal, so triage is a
@@ -152,9 +168,11 @@ sequenceDiagram
 | **Model choice** | Top model everywhere | Route per bundle (`light` / `full` / `human+top`); the cheap model for `light` is **off by default**, so today everything runs `opus` |
 | **Verification** | 3–5 skeptics on every finding | None. One tier-1 call (~660 tokens) per finding assigns the verdict; no adversarial re-check |
 | **Severity / gate** | Whatever the reasoning model said this run | Fixed-shape record → classifier → reproducible `block\|fix\|note`; exit code follows |
-| **Auth / keys** | Claude Code only | Claude Code **plus** `TYPESAFE_API_KEY` for tier 1 |
-| **Setup** | None | Install graphify, build graph, install hook |
-| **Source confidentiality** | Source goes to Claude | Same for Claude; the *extra* classifier sees structure only |
+| **Review dimensions** | Fixed list of dimension agents, one per lens | One reviewer, all lenses in one call, including unneeded-complexity (§5.3) — added in 0.3.0 |
+| **Auth / keys** | Claude Code only | Claude Code **plus** tier-1 access — either `TYPESAFE_API_KEY` (hosted Jev) **or** a self-hosted `SYSTEM1_URL` (e.g. `laya-serve`, no key) |
+| **Sensitive-path guardrail** | Depends on the prompt noticing | Deterministic path globs force the top model and a required human, whatever any score says (§8) |
+| **Setup** | None | Install graphify, build graph, install hook, verify with `ensure.py` |
+| **Source confidentiality** | Source goes to Claude | Same for Claude; the *extra* classifier sees structure only, or nothing at all if self-hosted |
 | **Failure mode** | Slow and expensive | Stale graph or bad bundling silently loses recall |
 | **Evidence it is better** | The reference baseline | **None yet** — see README "Status"; cost wins are structural, quality is unproven |
 
@@ -564,10 +582,13 @@ Three things carry the design:
    downstream scoring stage. The agent holds the diff and the neighbourhood; a separate
    scorer would see only the comment. Those fields are exactly what tier 1 later
    flattens into the verdict record (§4.2).
-3. **The agent sees `id, package, sensitive, facts, hunks` and nothing from tier 1.**
-   `agent.py KEYS` excludes `triage` and `route`, so system 1 cannot anchor system 2.
-   The original design passed system-1 "hints" as claims to verify; **that was not
-   built**, and the isolation is the simpler, safer choice.
+3. **The agent sees `id, package, sensitive, facts, hunks`, plus an optional `hints`
+   array.** `agent.py KEYS` still excludes `triage` and `route` wholesale — only
+   `risk` and `security_concern` cross over, via `hints_for()` (**built in 0.3.0**),
+   each phrased as "possible X, system-1 confidence Y" and required by the prompt
+   to be confirmed or refuted, never assumed. `route`, the confidence value itself,
+   and anything else tier 1 computed still never reach system 2, so it cannot anchor
+   on the one number that would make its own escalation logic circular.
 
 ---
 
@@ -648,13 +669,20 @@ Each guardrail is marked with where it lives.
   fails loudly (exit 2) instead of silently skipping triage.
 - **Degrade, never downgrade.** *Built.* Tier 1 down or confidence < 0.70 on a verdict
   falls back to the reviewer's own severity.
-- **Graph freshness.** *Not enforced in code.* The `graph-review` skill instructs the
-  user to check the graph post-dates the base commit; `review.py` only checks that the
-  file exists. A stale graph silently demotes matches from line to file precision.
-- **Deterministic stays deterministic.** *Partly built.* Skip-globs and whitespace-only
-  hunks never reach a model. Linters, CVE and SAST checks are assumed to run in CI.
-- **Feedback loop.** *Not built.* Logging accept/dismiss per comment is still the only
-  honest source of a quality number, and the only thing that would calibrate tier 1.
+- **Graph freshness.** *Built in 0.3.0.* `review.py`'s `graph_freshness()` compares
+  the graph's `built_at_commit` stamp against the repo's actual HEAD and warns loudly
+  on stderr when they differ; `stats.graph_freshness` carries both SHAs. Still not a
+  hard failure — a rebuild-in-flight shouldn't block a review — so the `graph-review`
+  skill's manual check remains the belt to this code's suspenders.
+- **Deterministic stays deterministic.** *Built in 0.3.0, opt-in.* Skip-globs and
+  whitespace-only hunks never reach a model, as before. `review.py --run-linters` can
+  now also shell out to configured `[[linters]]` at tier 0 — still zero tokens, still
+  assumed to run in CI too unless this flag replaces that.
+- **Feedback loop.** *Built in 0.3.0.* `feedback.py log`/`stats` appends accept/dismiss
+  per finding to a local JSONL log and summarises accept rate by category, severity,
+  and — the one that matters for calibration — whether tier 1's own verdict or the
+  fallback mapping was used. Still the only honest source of a quality number; now
+  there is somewhere to put it.
 
 ---
 
@@ -690,7 +718,7 @@ and derive entry-point status from **annotations scanned in source**, not from t
 The annotation scan is tier 0: free, and it is what makes the fact block trustworthy
 enough for §5's "do not grep" instruction to be safe.
 
-### 9.3 `path_to_sensitive` is noise as specified
+### 9.3 `path_to_sensitive` is noise as specified — fixed in 0.3.0
 
 `graphify path` walks all relation types, undirected, through test files:
 
@@ -699,7 +727,12 @@ EventLogController <--contains-- EventLogController.java --imports--> Constants
   <--imports-- QueryBuilderTest.java --imports--> JsonObject
 ```
 
-Restrict to **directed `calls` edges**, exclude tests, cap length — or drop the feature.
+**Built**, not via `graphify path`: `Graph.hops_to_sensitive()` walks only
+`self.callees` (directed `calls`, already `EXTRACTED`-only), refuses to route
+through a file matching the `[tests]` globs, and caps depth at 4 hops. A bundle
+not itself on a sensitive path but one directed call away from one gets a
+`path_to_sensitive_hops` fact and a `rank()` bonus scaled to how close it is —
+closer counts more, same deterministic-prior spirit as the rest of §6.
 
 ### 9.4 What works
 
@@ -707,10 +740,20 @@ Restrict to **directed `calls` edges**, exclude tests, cap length — or drop th
 implementable exactly as written. Relations: `calls` 9224, `references` 8819,
 `imports` 7743, `method` 3907, `contains` 643, `inherits` 119, `implements` 65.
 
-### 9.5 Capabilities that do not exist
+### 9.5 Capabilities that do not exist in graphify — built as our own equivalents in 0.3.0
 
-`graphify prs --triage` is not a command in 0.9.27; queue-level PR ranking must be built or
-dropped. There is no MCP server mode — `graphify install` copies a *skill*.
+`graphify prs --triage` is still not a command in 0.9.27, and `graphify install`
+still copies a *skill*, not an MCP server. Neither gap can be closed by changing
+graphify, so both were built **in this repo instead**, independent of whether
+graphify ever ships them:
+
+- **`rank_queue.py`** reuses `review.py`'s own `build()` per ref against a common
+  base, no new ranking logic — diff each ref, sum `risk_hint`, sort sensitive-first
+  then by total risk.
+- **`mcp_server.py`** is a hand-rolled stdio JSON-RPC server (line-delimited, no
+  `mcp` SDK — stdlib only, matching every other script here), exposing `review_diff`
+  and `rank_queue` as MCP tools so another tool can call this reviewer without
+  shelling out to the CLI.
 
 ---
 
@@ -817,12 +860,19 @@ Two further caveats:
 **Running it:**
 
 ```bash
-python bench.py prepare --bugs Lang:1,Math:5 --out tasks/     # needs defects4j on PATH
 python bench.py prepare-git --repo . --shas <fix-sha>,... --out tasks/   # own history, no download
 # ... run each arm, emit <bug>.json per task ...
 python bench.py score --tasks-dir tasks/ --findings-dir out/graph/ --tolerance 5
 python bench.py score --tasks-dir tasks/ --findings-dir out/baseline/ --tolerance 5
 ```
+
+**Cut in 0.3.0:** `bench.py prepare` and `setup-defects4j.sh`, the Defects4J-backed
+arm. `prepare-git` was already the primary, decisive arm (own history, no
+download); Defects4J was always supplementary and nothing else in this repo
+depended on it. The design discussion above stays — it is still the honest
+comparison of what each benchmark source can and cannot prove — but running it
+now means standing up Defects4J by hand, per its own docs, rather than through
+this repo.
 
 `prepare-git` is the cheap path and has been run (5 fix commits). It saturated; see
 [benchmark.md](benchmark.md) for why, and always sweep `--tolerance`.
@@ -868,20 +918,26 @@ rather than step 7.
 
 | File | Lines | Purpose |
 |---|---|---|
-| `review.py` | 260 | diff → hunks → facts → bundles → tier-1 triage → ranked JSON |
-| `agent.py` | 217 | bundles → one `claude -p` per bundle → findings → tier-1 verdict → exit code |
+| `review.py` | 378 | diff → hunks → facts → bundles → tier-1 triage → ranked JSON; graph freshness, `path_to_sensitive`, `--run-linters` (0.3.0) |
+| `agent.py` | 257 | bundles → one `claude -p` per bundle → findings → tier-1 verdict → exit code; hints to the reviewer, lint findings merged in (0.3.0) |
 | `system1.py` | 232 | `POST /v1/systemone` client, questions, `route()`. The swap seam (§4.1). |
 | `diffparse.py` | 73 | Unified-diff parsing, shared by review + bench |
-| `bench.py` | 190 | Task prep (Defects4J, git history) + localization scoring (§10.1) |
-| `ensure.py` (+ `.sh`, `.ps1`) | 229 | Preflight: key, `claude`, Python, `graphify`, `git`; `--deep` probes live |
-| `test_agent.py` | 40 | Self-check for the merge-gate fallback logic |
-| `agents/graph-reviewer.md` | 130 | The agent. Prompt and `tools: Read`, not program. |
+| `bench.py` | 163 | Task prep (own git history) + localization scoring (§10.1) + `selftest`; Defects4J path cut in 0.3.0 |
+| `rank_queue.py` | 103 | Rank refs by aggregate risk, no graphify flag needed (§9.5) |
+| `mcp_server.py` | 173 | Hand-rolled stdio MCP server exposing `review_diff`/`rank_queue` (§9.5) |
+| `feedback.py` | 145 | Log + summarise human accept/dismiss per finding (§8) |
+| `ensure.py` (+ `.sh`, `.ps1`) | 252 | Preflight: key, `claude`, Python, `graphify`, `git`; `--deep` probes live; reports which tier-1 mode is configured |
+| `test_agent.py` | 54 | Self-check for the merge-gate fallback logic, including `hints_for()` |
+| `test_review.py` (+ `test_fake_linter.py`) | 100 | Self-check for `hops_to_sensitive`, `graph_freshness`, `run_linters` |
+| `agents/graph-reviewer.md` | 143 | The agent. Prompt and `tools: Read`, not program. Complexity dimension + hints (0.3.0). |
 | `skills/graph-review/SKILL.md` | 103 | Interactive entry: check graph, run `review.py`, run `agent.py`, report |
-| `overrides.toml` | 36 | Tier-0 sensitive / skip / test globs |
-| `setup-defects4j.sh` | 65 | One-time benchmark toolchain install |
+| `overrides.toml` | 51 | Tier-0 sensitive / skip / test globs, optional `[[linters]]` |
 
-Line counts are as of the 0.2.0 tree. The only runnable self-check is
-`test_agent.py`, covering the merge-gate fallback; `bench.py` has no `selftest`.
+Line counts are as of the 0.3.0 tree. Runnable self-checks are now
+`test_agent.py` (merge gate, `hints_for`), `test_review.py` (graph logic),
+and each script's own `selftest` subcommand (`bench.py`, `feedback.py`,
+`rank_queue.py`, `mcp_server.py`) — all synthetic, none need network,
+`defects4j`, or a real `claude -p` call.
 
 ### Built, with deviations from this document
 

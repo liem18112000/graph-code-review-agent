@@ -34,3 +34,18 @@ globs = [
   "**/src/test/**", "**/test/**", "**/tests/**",
   "**/*Test.java", "**/*Tests.java", "**/*IT.java", "**/test_*.py",
 ]
+
+# Tier 0, opt-in via `review.py --run-linters`: zero tokens, never reaches
+# either model (§8 "Deterministic stays deterministic"). Most pipelines
+# already run linters/SAST in CI separately -- this is for running one here
+# too, e.g. in a git hook, without a separate CI step.
+#
+# The command must emit a JSON array to stdout:
+#   [{"path": "a.py", "line": 12, "severity": "error|warning|info", "message": "..."}]
+# That is OUR contract, not any one vendor's -- if a tool's native output
+# differs (most do), point `cmd` at a thin wrapper that adapts it.
+#
+# [[linters]]
+# name = "example"
+# glob = "**/*.py"
+# cmd = ["python", "scripts/lint_adapter.py"]

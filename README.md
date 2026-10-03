@@ -247,12 +247,19 @@ review.py           diff -> hunks -> graph facts -> ranked bundles
 system1.py          tier-1 client (the swappable slot)
 agent.py            headless driver: one `claude -p` per bundle
 diffparse.py        unified-diff parsing
+rank_queue.py       rank several branches/PRs by aggregate risk (no graphify flag needed)
+mcp_server.py       stdio MCP server exposing review_diff / rank_queue to other tools
+feedback.py         log + summarise human accept/dismiss per finding
 ensure.py           preflight check (.sh / .ps1 shims find Python first)
-test_agent.py       self-check for the merge-gate fallback
-bench.py            A/B replay harness for measuring against a baseline
-overrides.toml      tier-0 globs: sensitive / skip / tests
+test_agent.py       self-check: merge-gate fallback, hints_for()
+test_review.py      self-check: graph freshness, path-to-sensitive, linter wiring
+bench.py            A/B replay harness for measuring against a baseline (+ `selftest`)
+overrides.toml      tier-0 globs: sensitive / skip / tests, optional [[linters]]
 docs/               architecture.md (why), call-flow.md (what calls what), benchmark.md
 ```
+
+Every script above also runs `python <script>.py selftest` (or `test_*.py` directly)
+with no network, no `defects4j`, and no real `claude -p` call needed.
 
 ---
 
@@ -272,14 +279,6 @@ python bench.py score --tasks-dir tasks/ --findings-dir out/graph/
 that **re-introduces** the bug that commit fixed, and ground truth is what the fix
 touched. Build the graph at the fix commit — that is where the hook would have
 built it.
-
-Against Defects4J, which adds a triggering test as executable proof:
-
-```bash
-bash setup-defects4j.sh                      # one-time, multi-GB
-python bench.py prepare --bugs Lang:1,Math:5 --out tasks/
-python bench.py score --tasks-dir tasks/ --findings-dir out/graph/
-```
 
 It reports `localization_rate`, `mean_findings_per_bug`, and
 `mean_rank_of_first_hit` — rank matters because reviews are read top-down. A

@@ -40,6 +40,19 @@ when a fact points you at one and you need the body to decide.
   abstraction has exactly one caller or none. Weigh it the same way you weigh a
   caller count for a defect.
 
+## Hints (optional, unverified, from system 1)
+
+Your input may carry a `hints` array — a fast classifier's guess at this
+bundle's risk and security surface, from structure alone, before you read a
+single line. It has **not** read the diff.
+
+**Treat every hint as a claim to verify, never as a conclusion.** For each
+hint present, confirm it with a concrete finding grounded in the diff or the
+facts, or explicitly refute it in your own reasoning — do not silently agree
+or silently ignore it. A hint is evidence to check, not a lead that excuses
+skipping everything else "what to look for" lists. When `hints` is absent,
+proceed exactly as if it were never mentioned.
+
 ## What to look for
 
 correctness · security (injection, authz, secrets, unsafe deserialization) ·

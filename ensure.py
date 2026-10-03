@@ -213,8 +213,6 @@ def main():
     check_cmd("graphify", ["--version"], REQ, GRAPHIFY_FIX)
     check_agent()
     check_graph()
-    check_cmd("defects4j", ["--help"], OPT,
-              "optional: bash setup-defects4j.sh  (only needed for bench.py)")
 
     if deep:
         print("  ...running deep checks (network + one model call)\n")

@@ -1,6 +1,6 @@
 # Call Flow — how one review actually runs
 
-Implementation walkthrough. Every reference is `file:line` against the 0.2.0 code.
+Implementation walkthrough. Every reference is `file:line` against the 0.3.0 code.
 For *why* it is built this way, see `architecture.md`; this document is *what calls
 what*. If a line number here has drifted, the function name beside it is the anchor.
 
@@ -14,20 +14,23 @@ so its token table has no verdict calls.
 
 ```mermaid
 flowchart TD
-    D["git diff"] --> RP["review.py main():196"]
+    D["git diff"] --> RP["review.py main():300"]
     G["graph.json<br/><i>post-commit hook, 0 tokens</i>"] -.-> RP
 
-    RP --> T0{"tier 0<br/>build():137-141"}
+    RP --> FRESH["graph_freshness()<br/>review.py:87-103, 0.3.0"]
+    FRESH --> T0{"tier 0<br/>build():228-232"}
     T0 -->|"13 of 26 hunks"| DROP["dropped free"]
-    T0 -->|"13 survive"| FACTS["facts + bundles<br/>build():143-185"]
+    T0 -->|"13 survive"| FACTS["facts + bundles<br/>build():228-291"]
 
-    FACTS --> T1["tier 1 triage<br/>review.py:236-238"]
+    FACTS --> T1["tier 1 triage<br/>review.py:350-352"]
     T1 --> ROUTE["route()<br/>system1.py:212"]
-    ROUTE --> JSON["bundles.json"]
+    ROUTE --> LINT["--run-linters?<br/>review.py:368-370, 0.3.0, opt-in"]
+    LINT --> JSON["bundles.json"]
 
-    JSON --> AG["agent.py main():155<br/>one claude -p per bundle"]
-    AG --> VERD["adjudicate():108<br/>tier 1 verdict per finding"]
-    VERD --> OUT["findings.json + accounting<br/>exit 1 on block or sensitive"]
+    JSON --> AG["agent.py main():191<br/>one claude -p per bundle"]
+    AG --> VERD["adjudicate():144<br/>tier 1 verdict per finding"]
+    VERD --> LINTF["lint_findings_from():135<br/>deterministic, no model, 0.3.0"]
+    LINTF --> OUT["findings.json + accounting<br/>exit 1 on block or sensitive"]
 
     style T0 fill:#e6f4ea,stroke:#137333
     style T1 fill:#fef3e8,stroke:#f4a142
@@ -47,8 +50,11 @@ python review.py --diff pr.diff --graph graph.json --repo . [--max-bundle 12]
                  [--no-system1] [--gate] [--overrides overrides.toml]
 ```
 
-Exit 2 if the graph file is missing (`review.py:212`) or the tier-1 key is missing
-(see 2a). `--gate` with `--no-system1` is rejected (`:215`).
+Exit 2 if the graph file is missing (`review.py:319-321`) or the tier-1 key is
+missing (see 2a). `--gate` with `--no-system1` is rejected (`:323`). **0.3.0:**
+`graph_freshness()` (`:87-103`) runs right after the graph loads and warns loudly
+on stderr if the graph's `built_at_commit` stamp doesn't match the repo's HEAD —
+previously a manual step in the skill, not enforced here at all (§8).
 
 ### 1a. Parse the diff — `diffparse.py`
 
@@ -67,14 +73,14 @@ path function shared by `review.py` and `bench.py`.
 
 ### 1b. Tier 0 — free, deterministic
 
-`build()` (`review.py:137-141`):
+`build()` (`review.py:228-234`):
 
 ```python
 why = ("skip-glob" if hit(h.path, ov["skip"]) else
        "whitespace-only" if h.is_whitespace_only else None)
 ```
 
-`hit()` (`:42`) is `fnmatch` against `overrides.toml`. `load_overrides()` (`:33`)
+`hit()` (`:83`) is `fnmatch` against `overrides.toml`. `load_overrides()` (`:42`)
 falls back to the copy shipped beside the script when the target repo has none —
 otherwise empty globs would silently disable tier 0. **No model runs here.** Each
 dropped hunk is reported with its `reason`. On the reference diff this resolved
@@ -82,25 +88,29 @@ dropped hunk is reported with its `reason`. On the reference diff this resolved
 
 ### 1c. Index the graph — one pass
 
-`Graph.__init__` (`review.py:51`) builds, in a single walk over the edges:
+`Graph.__init__` (`review.py:112-131`) builds, in a single walk over the edges:
 
 | Index | Purpose |
 |---|---|
 | `by_id` | node lookup |
 | `by_base` | basename → nodes, for the **suffix** path join |
-| `fan_in` | incoming `calls`, **`EXTRACTED` only** (`:65`) |
+| `fan_in` | incoming `calls`, **`EXTRACTED` only** (`:125`) |
 | `callees` | outgoing `calls` |
 | `incoming` | `calls` + `references`, used for test coverage |
 
-Edges are read from `edges` **or** `links` (`:64`): clustered graphs use the former,
+Edges are read from `edges` **or** `links` (`:124`): clustered graphs use the former,
 `graphify update --no-cluster` the latter. The `confidence != "EXTRACTED"` guard
-(`:65`) is §9.4: inferred edges never become numbers.
+(`:125`) is §9.4: inferred edges never become numbers.
+
+**0.3.0:** two more methods live here — `sensitive_ids()` (`:156-157`) and
+`hops_to_sensitive()` (`:159-186`), the bounded BFS behind the `path_to_sensitive`
+fix (§9.3, see 1f).
 
 ### 1d. Map hunks to nodes
 
-`Graph.nodes_for()` (`:77`) → `(nodes, precision)`:
+`Graph.nodes_for()` (`:137`) → `(nodes, precision)`:
 
-- `in_file()` (`:73`) matches by **suffix**, because graph `source_file` points into a
+- `in_file()` (`:133`) matches by **suffix**, because graph `source_file` points into a
   build-time staging copy that may no longer exist.
 - Any node whose line falls inside the hunk → `precision: "line"`.
 - Otherwise all nodes in the file → `precision: "file"`. 36% of nodes have no line
@@ -111,20 +121,21 @@ Edges are read from `edges` **or** `links` (`:64`): clustered graphs use the for
 
 | Fact | Source | Where |
 |---|---|---|
-| `symbols[].callers` | graph `fan_in` | `build():167` |
-| `symbols[].callees` | graph, first 8 | `build():168` |
-| `entry_point_annotations` | **source scan, not the graph** | `entries()` `:97` |
-| `covering_tests` | graph, **file level** | `tests_for()` `:84` |
+| `symbols[].callers` | graph `fan_in` | `build():264` |
+| `symbols[].callees` | graph, first 8 | `build():265` |
+| `entry_point_annotations` | **source scan, not the graph** | `entries()` `:189` |
+| `covering_tests` | graph, **file level** | `tests_for()` `:144` |
+| `path_to_sensitive_hops` | `Graph.hops_to_sensitive()` | computed `:272-273`, stored `:283`, **0.3.0** |
 
 Only nodes whose label starts with `.` count as symbols (methods, §9.1).
 
-**`callers` is `"unknown"` when fan-in is zero, never `0`** (`:167`). On the measured
+**`callers` is `"unknown"` when fan-in is zero, never `0`** (`:264`). On the measured
 service 66% of methods have no callers in the graph because CDI wires them; zero
 means *unmeasured*, and reporting `0` would teach a risk model that entry points
 are safe.
 
 **`entries()` scans 40 lines above through the end of the hunk** with `ENTRY_RE`
-(`:23`) — `@Path`, HTTP verbs, `@Observes*`, `@Scheduled`, `@ConsumeEvent`,
+(`:24`) — `@Path`, HTTP verbs, `@Observes*`, `@Scheduled`, `@ConsumeEvent`,
 `@Incoming`, `@PostConstruct`, `@Startup`. It needs `--repo`; without it the list is
 empty.
 
@@ -134,13 +145,21 @@ silently returns "no tests" for a well-covered class.
 
 ### 1f. Bundle and rank
 
-`build()` (`:143-185`). Group by **package directory** (`:145`) — the graph ships no
+`build()` (`:228-291`). Group by **package directory** (`:236-238`) — the graph ships no
 community data, and for Java the package is the module boundary. Sort by
-`(path, start)` (`:149`) so a file's hunks stay together, then chunk by `--max-bundle`
+`(path, start)` (`:244`) so a file's hunks stay together, then chunk by `--max-bundle`
 (default 12; each bundle is one agent paying its own cold cache write, so coarse beats
 fine). `sensitive` is true if **any** hunk in the chunk matches a sensitive glob.
 
-`rank()` (`:107`) produces a deterministic prior **and its basis**:
+**0.3.0 — `path_to_sensitive`, fixed (§9.3):** `sens_ids = g.sensitive_ids(...)`
+(`:241`) is computed once for the whole run, not per bundle. For a bundle that is
+*not* itself sensitive, `g.hops_to_sensitive(sym_ids, sens_ids, ov["tests"])`
+(`:272-273`) walks only directed `calls` edges, excludes test files, caps at 4
+hops, and returns the hop count or `None`. The original `graphify path` walked all
+relation types, undirected, through tests — this replaces it rather than calling it.
+
+`rank()` (`:199`) produces a deterministic prior **and its basis** — now including
+the path-to-sensitive bonus when `hops` is not `None` (`:222-223`):
 
 ```
 sensitive path (+100); entry @ObservesAsync (+25);
@@ -148,24 +167,34 @@ sensitive path (+100); entry @ObservesAsync (+25);
 no covering tests (+10); 6 hunk(s) (+6)   = 153
 ```
 
-Bundles are sorted by `risk_hint` descending (`:187`). Output also carries
+Bundles are sorted by `risk_hint` descending (`:291`). Output also carries
 `stats` (`hunks_in_diff`, `hunks_dropped_free`, `bundles`, `sensitive_bundles`,
-`unmapped_bundles`) and the `dropped` list.
+`unmapped_bundles`, `graph_freshness`) and the `dropped` list.
+
+### 1g. Linters — opt-in, 0.3.0 (`review.py:368-370`)
+
+With `--run-linters`, after tier 1 (if any) runs: `load_linters()` (`:47-51`) reads
+`[[linters]]` from `overrides.toml`; `run_linters()` (`:54-80`) shells out to each
+configured command, once, for the files its `glob` matches among the surviving
+hunks' paths — never the whole repo. Each command's stdout must be a JSON array of
+`{"path", "line", "severity", "message"}` — this project's own contract, not any one
+vendor's. Results land in `res["lint_findings"]`, never go through either model, and
+`agent.py` merges them into the final output directly (3f).
 
 ---
 
 ## Stage 2 — `system1.py`: tier-1 triage
 
-Runs inside `review.py:223-252`, on by default. `--no-system1` opts out.
+Runs inside `review.py:337-366`, on by default. `--no-system1` opts out.
 
 ```mermaid
 sequenceDiagram
-    participant R as review.py:223
+    participant R as review.py:337
     participant S as system1.py
     participant J as tier-1 API
 
-    R->>S: env_source("SYSTEM1_URL") :230
-    R->>S: env("TYPESAFE_API_KEY") :231
+    R->>S: env_source("SYSTEM1_URL") :344
+    R->>S: env("TYPESAFE_API_KEY") :345
     Note over R: hosted URL and no key -> exit 2
     loop per bundle
         R->>S: triage(bundle) :191
@@ -176,7 +205,7 @@ sequenceDiagram
         S-->>R: risk, confidence, security_concern, usage
         R->>S: route(triage, sensitive) :212
     end
-    Note over R: with --gate, sort by route then risk_hint :250
+    Note over R: with --gate, sort by route then risk_hint :364-366
 ```
 
 ### 2a. Key resolution — `env_source()` (`system1.py:34`)
@@ -185,7 +214,7 @@ Order: process environment → `.env` beside `system1.py` → on Windows, the us
 registry (`HKCU\Environment`, where `setx` writes; a shell started earlier never
 inherits it, and the origin label says so). `env()` (`:50`) returns the value only.
 
-**Failure modes, deliberately different** (`review.py:225-235`):
+**Failure modes, deliberately different** (`review.py:337-349`):
 
 | Situation | Behaviour |
 |---|---|
@@ -284,7 +313,7 @@ it with `_no_source()`, and asks `Q_VERDICT` (`:101`) for `block | fix | note`. 
 
 ### 2g. Stats
 
-`review.py:239-249` sums the triage calls into `stats.system1_usage`
+`review.py:353-363` sums the triage calls into `stats.system1_usage`
 (`calls`, `input_tokens`, `output_tokens`, `est_usd` at the published $0.042/1M rate,
 `model`) and `stats.system1_ok` (`"4/4"`).
 
@@ -299,10 +328,13 @@ python agent.py --bundles bundles.json --repo . [--concurrency 4] [--timeout 600
 
 Exit 2 if `claude` is not on PATH (`:170`).
 
-### 3a. One subprocess per bundle — `review()` (`agent.py:45`)
+### 3a. One subprocess per bundle — `review()` (`agent.py:63`)
 
 ```python
-"claude", "-p", json.dumps({k: bundle[k] for k in KEYS}, indent=2),
+payload = {k: bundle[k] for k in KEYS}
+if hints := hints_for(bundle):
+    payload["hints"] = hints
+"claude", "-p", json.dumps(payload, indent=2),
 "--agent", AGENT, "--model", model,
 "--output-format", "json",
 "--permission-mode", "dontAsk",
@@ -313,16 +345,19 @@ Exit 2 if `claude` is not on PATH (`:170`).
 - **`--agent graph-reviewer`** loads `agents/graph-reviewer.md`, which carries the
   prompt *and* the `tools: Read` grant. The interactive skill uses the same
   definition, so both runtimes review identically.
-- **`KEYS`** (`:29`) sends only `id, package, sensitive, facts, hunks`. The tier-1
-  result (`triage`, `route`) and `risk_hint` are deliberately **not** sent.
+- **`KEYS`** (`:29`) sends only `id, package, sensitive, facts, hunks`. `route` and
+  the confidence value are **never** sent. **0.3.0:** `hints_for()` (`:32`) adds an
+  optional `hints` array — only `risk` and `security_concern`, reframed as claims to
+  verify, never as a conclusion system 2 inherits. Empty when tier 1 was down or
+  skipped, so a missing `hints` key is not itself a signal.
 - **`dontAsk`** — a permission prompt in a non-interactive run is a hang.
-- **Model** (`:46`): `--cheap-model` if `route` is in `CHEAP_ROUTES = {"light"}`
+- **Model** (`:64`): `--cheap-model` if `route` is in `CHEAP_ROUTES = {"light"}`
   (`:27`), else `opus`. Default `--cheap-model` is `opus`, so the lever is inert.
 
 **This is one call, not an agent loop.** `review.py` already resolved the facts, so
 there is nothing for the model to discover. That is the cost thesis.
 
-### 3b. Error handling (`agent.py:62-65`)
+### 3b. Error handling (`agent.py:83-86`)
 
 ```python
 body = json.loads(out.decode() or "{}") if out else {}
@@ -331,42 +366,46 @@ if proc.returncode != 0 or body.get("is_error"):
 
 Claude Code reports failures as `is_error` in the JSON **on stdout**; stderr is usually
 empty. Reading stderr alone loses the message. A timeout kills the process
-(`:56-58`).
+(`:77-78`).
 
-### 3c. Parsing — `findings_from()` (`agent.py:32`)
+### 3c. Parsing — `findings_from()` (`agent.py:50`)
 
 `--output-format json` wraps the reply. `re.search(r"\[.*\]", text, re.S)` tolerates a
-code fence or surrounding prose. Each finding is tagged with its `bundle` id (`:76`),
+code fence or surrounding prose. Each finding is tagged with its `bundle` id (`:97`),
 which is how the verdict step later finds whether the bundle was sensitive.
 
-### 3d. Concurrency — `run()` (`agent.py:80`)
+### 3d. Concurrency — `run()` (`agent.py:101`)
 
 `asyncio.Semaphore` caps in-flight subprocesses; `gather` fans out. `one()` swallows
 per-bundle exceptions, prints them to stderr and returns `[], {}` — **one bundle must
 not sink the run**. The consequence: a failed bundle yields zero findings and no
 exit-code signal beyond its stderr line.
 
-### 3e. Ordering (`agent.py:181-186`)
+### 3e. Ordering (`agent.py:220-222`)
 
 Findings sort by: introduced before `pre_existing`, then `blocker > should_fix >
 nitpick`, then higher `confidence` first.
 
-### 3f. The verdict — `adjudicate()` (`agent.py:108`)
+### 3f. The verdict — `adjudicate()` (`agent.py:144`)
 
 For each finding, `system1.verdict()` is called. It is accepted only if
 `ok` **and** `confidence >= 0.70` **and** the choice is one of `block|fix|note`
-(`:119-120`). Otherwise `FALLBACK` (`:105`) maps the reviewer's own severity:
+(`:155-156`). Otherwise `FALLBACK` (`:126`) maps the reviewer's own severity:
 `blocker→block`, `should_fix→fix`, `nitpick→note`. `verdict_by` records which
 (`system1` or `fallback:<reason>`).
 
-Then a **deterministic clamp** (`:125`): `scope == "pre_existing"` and `block` →
+Then a **deterministic clamp** (`:161`): `scope == "pre_existing"` and `block` →
 `note`. A defect this diff did not introduce cannot gate its merge, whatever tier 1
 says.
 
-`--no-verdict` (`:187-193`) applies the same `FALLBACK` and clamp without calling
+`--no-verdict` (`:223-230`) applies the same `FALLBACK` and clamp without calling
 tier 1. `test_agent.py` pins this path.
 
-### 3g. Exit code — `agent.py:213`
+**0.3.0:** lint findings (`lint_findings_from()`, `:132-141`) bypass both this step
+and system 2 entirely — they already carry a verdict from `LINT_VERDICT`
+(error→fix, warning/info→note) before they ever reach `main()`'s sort.
+
+### 3g. Exit code — `agent.py:253`
 
 ```python
 return 1 if blockers or sensitive else 0
@@ -378,7 +417,7 @@ a human even with zero findings.
 
 ---
 
-## Token accounting — `accounting()` (`agent.py:132`)
+## Token accounting — `accounting()` (`agent.py:168`)
 
 Printed to stderr as JSON. Tier-1 triage totals come from `stats.system1_usage`
 (summed in `review.py`), plus `verdict_calls` and `verdict_tokens` from the
@@ -404,28 +443,28 @@ Measured on the reference diff (before the verdict stage existed):
 ## Where `bench.py` attaches
 
 `bench.py` never invokes either arm — it prepares tasks and grades answers, so it
-stays neutral and runs without Claude or the tier-1 vendor.
+stays neutral and runs without Claude or the tier-1 vendor. **0.3.0:** the
+Defects4J-backed `prepare` / `prepare_bug()` path was cut — it was always the
+supplementary arm (§10.1), `prepare-git` was already primary, and nothing else in
+this repo depended on it. `setup-defects4j.sh` is gone with it.
 
 ```mermaid
 flowchart LR
-    D4["Defects4J"] --> P["prepare_bug :30"]
-    GH["git history"] --> PG["prepare_git :57"]
-    P --> T["tasks/*.json"]
-    PG --> T
+    GH["git history"] --> PG["prepare_git :30"]
+    PG --> T["tasks/*.json"]
     T --> A1["arm A: baseline reviewer"]
     T --> A2["arm B: review.py + agent.py"]
-    A1 --> SC["score_one :81"]
+    A1 --> SC["score_one :54"]
     A2 --> SC
-    SC --> AGG["aggregate :102"]
+    SC --> AGG["aggregate :75"]
 ```
 
-- `prepare_bug()` diffs `V_fixed → V_buggy`, so the "PR" introduces a known bug, with
-  the triggering test as proof.
-- `prepare_git()` diffs `sha..sha~1` over `*.java` — the same inversion from a real fix
-  commit, with no triggering test.
+- `prepare_git()` diffs `sha..sha~1` over `*.java` — the "PR" re-introduces the bug
+  a real fix commit fixed, with no triggering test (weaker than an executable
+  benchmark, but it runs against your own history with no download).
 - `score_one()` takes `--tolerance` (default 5) and reports `rank_of_first_hit`,
   because reviews are read top-down.
-- A **missing findings file counts as a miss**, never a skip (`bench.py:172-178`).
+- A **missing findings file counts as a miss**, never a skip (`bench.py:142-148`).
 
 ---
 
