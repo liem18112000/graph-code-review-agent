@@ -1,6 +1,6 @@
 # Call Flow — how one review actually runs
 
-Implementation walkthrough. Every reference is `file:line` against the 0.3.0 code.
+Implementation walkthrough. Every reference is `file:line` against the 0.4.1 code.
 For *why* it is built this way, see `architecture.md`; this document is *what calls
 what*. If a line number here has drifted, the function name beside it is the anchor.
 
@@ -23,7 +23,7 @@ flowchart TD
     T0 -->|"13 survive"| FACTS["facts + bundles<br/>build():228-291"]
 
     FACTS --> T1["tier 1 triage<br/>review.py:350-352"]
-    T1 --> ROUTE["route()<br/>system1.py:212"]
+    T1 --> ROUTE["route()<br/>system1.py:228"]
     ROUTE --> LINT["--run-linters?<br/>review.py:368-370, 0.3.0, opt-in"]
     LINT --> JSON["bundles.json"]
 
@@ -194,35 +194,39 @@ sequenceDiagram
     participant J as tier-1 API
 
     R->>S: env_source("SYSTEM1_URL") :344
-    R->>S: env("TYPESAFE_API_KEY") :345
-    Note over R: hosted URL and no key -> exit 2
+    R->>S: requires_key(effective url) :345, see system1.py:29-33
+    Note over R: opted into hosted Jev with no key -> exit 2
     loop per bundle
-        R->>S: triage(bundle) :191
-        S->>S: features(bundle) :146
-        Note over S: _no_source() guard :166
-        S->>J: POST /v1/systemone  ask():175
+        R->>S: triage(bundle) :207
+        S->>S: features(bundle) :161
+        Note over S: _no_source() guard :181
+        S->>J: POST /v1/systemone  ask():190
         J-->>S: answers + usage
         S-->>R: risk, confidence, security_concern, usage
-        R->>S: route(triage, sensitive) :212
+        R->>S: route(triage, sensitive) :228
     end
     Note over R: with --gate, sort by route then risk_hint :364-366
 ```
 
-### 2a. Key resolution — `env_source()` (`system1.py:34`)
+### 2a. Key resolution — `env_source()` (`system1.py:49`)
 
 Order: process environment → `.env` beside `system1.py` → on Windows, the user
 registry (`HKCU\Environment`, where `setx` writes; a shell started earlier never
-inherits it, and the origin label says so). `env()` (`:50`) returns the value only.
+inherits it, and the origin label says so). `env()` (`:65`) returns the value only.
+
+**0.4.1: `DEFAULT_URL` is Laya, self-hosted, no key** (`system1.py:23`).
+`requires_key(url)` (`:29-33`) is `True` only for `JEV_HOSTED_URL` (`:24`) — the
+one case that still needs `TYPESAFE_API_KEY`.
 
 **Failure modes, deliberately different** (`review.py:337-349`):
 
 | Situation | Behaviour |
 |---|---|
-| Hosted default URL and no key — **misconfiguration** | Hard `exit 2` before any triage. |
-| Custom `SYSTEM1_URL` (e.g. a self-hosted server) | No key required; the swap seam of §4.1. |
-| Key present, endpoint down — **outage** | `triage()` returns `ok: false`; `route()` returns `full`. Never downgrades. |
+| Opted into hosted Jev (`SYSTEM1_URL` set to it), no key — **misconfiguration** | Hard `exit 2` before any triage. |
+| Default or any other self-hosted `SYSTEM1_URL` | No key required; the swap seam of §4.1. |
+| Endpoint configured but unreachable — **outage** | `triage()` returns `ok: false`; `route()` returns `full`. Never downgrades. |
 
-### 2b. The payload — `features()` (`system1.py:146`)
+### 2b. The payload — `features()` (`system1.py:161`)
 
 Nine scalar fields, ~70 tokens. **No diff, no source.** Names and counts travel.
 
@@ -235,23 +239,24 @@ Nine scalar fields, ~70 tokens. **No diff, no source.** Names and counts travel.
  "covering_tests": 0, "sensitive_path": "yes", "found_in_graph": "yes"}
 ```
 
-**`_no_source()` (`:166`) is a runtime guard, not a test.** Every field is a
+**`_no_source()` (`:181`) is a runtime guard, not a test.** Every field is a
 single-line name or count, so a `@@` or an escaped newline in the serialised record
 means diff text got in, and it raises `ValueError`. The same guard wraps the verdict
 record (2f). This is what makes a closed external vendor acceptable against a
-proprietary codebase.
+proprietary codebase — and is unconditional even against the self-hosted default.
 
-### 2c. The request — `ask()` (`system1.py:175`)
+### 2c. The request — `ask()` (`system1.py:190`)
 
 ```json
-{"model": "jev-latest", "state": {...}, "questions": {...}}
+{"model": "laya", "state": {...}, "questions": {...}}
 ```
 
-URL is `SYSTEM1_URL` or `DEFAULT_URL`; model is `SYSTEM1_MODEL` or `jev-latest`;
+URL is `SYSTEM1_URL` or `DEFAULT_URL` (now Laya's); model is `SYSTEM1_MODEL` or
+`DEFAULT_MODEL` ("laya"; set `SYSTEM1_MODEL=jev-latest` when opting into Jev).
 `Authorization: Bearer` is added only when a key exists; timeout 20 s. `model` is
-**required** by the hosted API (422 without it).
+**required** by both vendors' APIs (422 without it, on the hosted one).
 
-### 2d. The questions — `QUESTIONS` (`system1.py:62`)
+### 2d. The questions — `QUESTIONS` (`system1.py:77`)
 
 Two `choice` questions: risk (`low|medium|high`) and security surface
 (`none|authz|input|secrets`). `tests_missing` and `needs_deep_review` were dropped —
@@ -270,7 +275,7 @@ The disambiguation that mattered: *"Treat max_callers 'unknown' as UNMEASURED, n
 zero"*, and *"entry_point, not unknown_callers, is the authority on whether the runtime
 invokes this code"*.
 
-### 2e. Routing — `route()` (`system1.py:212`)
+### 2e. Routing — `route()` (`system1.py:228`)
 
 Evaluated top-down; **every absence of signal escalates**:
 
@@ -303,12 +308,12 @@ Real result on the reference diff (from the earlier tier-1 instructions) — not
 b000 is the design working: tier 1 said *low* but wasn't sure, so it escalated rather
 than downgrading.
 
-### 2f. The verdict — `verdict()` (`system1.py:128`)
+### 2f. The verdict — `verdict()` (`system1.py:143`)
 
 Called later from `agent.py`, not from `review.py`. Builds a six-field record
 (`severity_claimed`, `scope`, `reviewer_confidence`, `summary`, `failure`,
-`sensitive_path`), each passed through `flat()` (`:122`, one line, 240 chars), checks
-it with `_no_source()`, and asks `Q_VERDICT` (`:101`) for `block | fix | note`. It
+`sensitive_path`), each passed through `flat()` (`:137`, one line, 240 chars), checks
+it with `_no_source()`, and asks `Q_VERDICT` (`:116`) for `block | fix | note`. It
 **never raises**: an outage returns `{"ok": False, ...}` so the caller can fall back.
 
 ### 2g. Stats

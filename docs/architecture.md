@@ -12,8 +12,11 @@ Shaped as **one agent plus one script**, not an orchestration service.
 
 > **Naming.** The *JEV-LLM-Graphify* pattern: **TypeSafe Jev** as system 1, **Claude** as
 > system 2, **Graphify** for structure. System 1 is a **swappable slot** behind one HTTP
-> contract — **Laya** ([`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya))
-> can replace Jev later by changing a base URL. See §4.1.
+> contract. **0.4.1: the default flipped** — self-hosted **Laya**
+> ([`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya)) is now
+> `DEFAULT_URL`, no key needed; Jev is the opt-in vendor. §4.1 explains why Jev was
+> originally planned *first* (it is usable zero-shot; Laya's un-tuned confidence is not)
+> and what that means in practice now that Laya runs by default.
 
 > **Design vs. built.** This document started as a design; the code now exists and
 > differs in places. Where it does, the text says **Built:** or **Not built:**.
@@ -31,7 +34,7 @@ Shaped as **one agent plus one script**, not an orchestration service.
 > | Second independent reviewer on high-risk bundles | **Not built, deliberately** — the mitigation *if* §10's benchmark shows lens fan-out matters; it has not yet discriminated either way |
 > | System-1 hints passed to the reviewer | **Built in 0.3.0** — `agent.py hints_for()` crosses over `risk`/`security_concern` only (never `route` or confidence), framed as claims to confirm or refute (§5.3) |
 > | Graph-freshness check | **Built in 0.3.0** — `review.py graph_freshness()` compares the graph's stamped `built_at_commit` to the repo's actual HEAD and warns loudly on stderr, no longer a manual skill step |
-> | System 1 as a swappable vendor slot, self-hosted with no key | **Built** — one HTTP contract (§4.1); `laya-serve` needs no `TYPESAFE_API_KEY`. **0.3.0 fix:** `review.py` and `ensure.py` both gated the key regardless of `SYSTEM1_URL` until then |
+> | System 1 as a swappable vendor slot, self-hosted with no key | **Built, and the default since 0.4.1** — one HTTP contract (§4.1); `laya-serve` is `DEFAULT_URL`, needs no `TYPESAFE_API_KEY`. **0.3.0 fix:** the key gate ignored `SYSTEM1_URL` entirely before then. **Cost:** un-tuned Laya's confidence (0.03–0.07, measured) means every bundle escalates to `full` by default until it is tuned or Jev is configured |
 > | Reviewer flags unneeded complexity (interfaces, wrappers, config nobody varies) | **Built** in 0.3.0 — `category: complexity`, reuses the same `callers` fact that drives risk (§5.3) |
 > | Hard overrides: sensitive path → top model + required human | **Built** (§8) — `overrides.toml [sensitive]`, `route()`, `agent.py` exit 1 |
 > | Found-edges-only guardrail (`INFERRED` edges never reach either model) | **Built** (§8) — dropped in `Graph.__init__`; not even passed to system 2 as a soft hint |
@@ -169,7 +172,7 @@ sequenceDiagram
 | **Verification** | 3–5 skeptics on every finding | None. One tier-1 call (~660 tokens) per finding assigns the verdict; no adversarial re-check |
 | **Severity / gate** | Whatever the reasoning model said this run | Fixed-shape record → classifier → reproducible `block\|fix\|note`; exit code follows |
 | **Review dimensions** | Fixed list of dimension agents, one per lens | One reviewer, all lenses in one call, including unneeded-complexity (§5.3) — added in 0.3.0 |
-| **Auth / keys** | Claude Code only | Claude Code **plus** tier-1 access — either `TYPESAFE_API_KEY` (hosted Jev) **or** a self-hosted `SYSTEM1_URL` (e.g. `laya-serve`, no key) |
+| **Auth / keys** | Claude Code only | Claude Code only, by default — tier 1 targets self-hosted `laya-serve` with no key; `TYPESAFE_API_KEY` is only needed if `SYSTEM1_URL` opts into hosted Jev |
 | **Sensitive-path guardrail** | Depends on the prompt noticing | Deterministic path globs force the top model and a required human, whatever any score says (§8) |
 | **Setup** | None | Install graphify, build graph, install hook, verify with `ensure.py` |
 | **Source confidentiality** | Source goes to Claude | Same for Claude; the *extra* classifier sees structure only, or nothing at all if self-hosted |
@@ -385,20 +388,22 @@ cost. There is no per-route `effort` setting.
 
 ### 4.1 System 1 is a swappable slot
 
-**Today: Jev. Later: Laya. One base URL.**
+**0.4.1: Default Laya, self-hosted, no key. Opt in to Jev, hosted, needs a key.**
 
 `laya-serve` implements the same `POST /v1/systemone` request/response shape as TypeSafe
-Jev. So tier 1 is defined by **that contract**, not by a vendor:
+Jev. So tier 1 is defined by **that contract**, not by a vendor — and now
+`system1.DEFAULT_URL` names Laya, not Jev:
 
 ```bash
-SYSTEM1_URL=https://api.typesafe.ai/v1/systemone   # today  - Jev
-SYSTEM1_URL=http://localhost:8000/v1/systemone     # later  - laya-serve, self-hosted
+SYSTEM1_URL=http://localhost:8000/v1/systemone     # default -- laya-serve, self-hosted, no key
+SYSTEM1_URL=https://api.typesafe.ai/v1/systemone   # opt-in  -- Jev, needs TYPESAFE_API_KEY
 ```
 
 Nothing else in the design moves. Keep the contract at the boundary and the vendor choice
 stays reversible for the cost of an environment variable.
 
-**Why Jev first.** It is usable zero-shot, and Laya is not:
+**Why this flips the original "Jev first" reasoning, and what it costs.** The design
+originally shipped Jev as the default because it is usable zero-shot and Laya is not:
 
 | | Jev 1.13.0 | Laya base |
 |---|---|---|
@@ -406,10 +411,20 @@ stays reversible for the cost of an environment variable.
 | Usable without fine-tuning | **yes** | no — needs a labelled domain set first |
 | Options supported | up to 255 | degrades past ~20 |
 
-That removes an entire prerequisite from the critical path. With Laya, tier 1 could not be
-switched on until enough labelled PR history existed to fine-tune against. With Jev, tier 1
-works as soon as it is wired up — so shadow mode measures a *real* classifier from day one
-instead of waiting on a training set.
+That table is still accurate — Laya's un-tuned confidence is genuinely weak. **Measured
+live** against a real `laya-serve` (§10, own history): 0.03–0.07 confidence on every
+bundle, far under the 0.70 routing floor. The practical consequence of making it the
+default: **every bundle now escalates to `full`/`human+top` out of the box**, same as any
+tier-1 outage (§8 degrade-never-downgrade). Quality is not at risk — system 2 still
+reviews everything — but the *cost lever* tier 1 exists for is inert by default until
+either Laya is fine-tuned on this codebase's history, or `SYSTEM1_URL` opts into Jev.
+
+**The trade being made deliberately:** zero required setup and no external key by
+default, in exchange for tier-1's cost savings not materialising until one of those two
+things happens. Before 0.4.1 the trade ran the other way — a working cost lever on day
+one, in exchange for a mandatory external key and a closed-API dependency. Jev still
+works as soon as it is wired up, so opting into it remains the fast path to a *working*
+tier 1 rather than merely a *present* one.
 
 **What it costs instead:**
 
@@ -470,7 +485,9 @@ the user registry where `setx` writes. A custom `SYSTEM1_URL` needs no key.
 It is also the better factoring regardless of vendor: the classifier ranks *structure*, the
 LLM reads *code*.
 
-**Deferred until the Laya swap** — do not build these now, but do not lose them:
+**Still deferred, even though Laya is now the default** — the swap was just the base
+URL; these Laya-specific adaptations are not built, and not needed until Laya is
+actually being fine-tuned against this codebase's history:
 
 | Laya constraint | Action at swap time |
 |---|---|

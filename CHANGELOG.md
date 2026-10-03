@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.1
+
+### Changed — self-hosted Laya is now the default, not the opt-in
+
+`system1.DEFAULT_URL` was the hosted Jev vendor; it is now
+`http://localhost:8000/v1/systemone` (a local `laya-serve`), with
+`DEFAULT_MODEL = "laya"`. `TYPESAFE_API_KEY` is only required when
+`SYSTEM1_URL` explicitly opts into the hosted Jev vendor
+(`system1.requires_key()` centralizes that check; `review.py` and
+`ensure.py` both use it).
+
+Prompted by a real review run where tier 1 was silently skipped entirely
+(`--no-system1`, every bundle on the top model) because nothing in that
+environment had `SYSTEM1_URL` set — the previous default assumed a hosted
+vendor and a key, so no configuration meant a hard `exit 2` unless bypassed.
+Now no configuration means tier 1 just works, against the self-hosted
+default.
+
+**The honest cost of this default, measured, not assumed:** Laya's
+un-tuned confidence (0.03–0.07 against a real bundle) sits far under the
+0.70 routing floor, so **every bundle now escalates to `full`/`human+top`
+by default** until Laya is fine-tuned against real history or `SYSTEM1_URL`
+opts into Jev. Quality is unaffected — system 2 still reviews everything,
+same as any tier-1 outage (§8 degrade-never-downgrade) — but the cost lever
+tier 1 exists for doesn't pay off out of the box. `docs/architecture.md`
+§4.1 lays out the full trade.
+
 ## 0.4.0
 
 ### Added — every "Not built" row in the design doc that was safe to build

@@ -40,7 +40,7 @@ GRAPHIFY_FIX = "install graphify per its own docs and put it on PATH"
 KEY_FIX = pick('setx TYPESAFE_API_KEY "<key>"   (reopen the shell afterwards)',
                'export TYPESAFE_API_KEY=<key>   (add to ~/.zshrc)',
                'export TYPESAFE_API_KEY=<key>   (add to ~/.bashrc)'
-               ) + "   -- or run tier 1 self-hosted: set SYSTEM1_URL instead, no key needed"
+               ) + "   -- or unset SYSTEM1_URL to use the self-hosted default instead, no key needed"
 
 
 def add(name, tier, status, detail, fix=""):
@@ -117,23 +117,23 @@ def check_agent():
 
 
 def check_key():
-    """Two supported modes (README "Swapping the classifier"): hosted Jev with
-    a key, or a self-hosted SYSTEM1_URL (e.g. laya-serve) with none. Mirrors
-    the same gate review.py applies before tier 1 runs -- a key is only a MUST
-    against the default hosted endpoint."""
+    """Two supported modes (README "Swapping the classifier"): the
+    self-hosted default (laya-serve, no key), or the hosted Jev vendor
+    (needs TYPESAFE_API_KEY). Mirrors the same gate review.py applies before
+    tier 1 runs -- a key is only a MUST when opting into the hosted vendor."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
         import system1
     except Exception:                             # covered by check_modules
         return add("TYPESAFE_API_KEY", MUST1, FAIL, "cannot import system1", "")
     url, _ = system1.env_source("SYSTEM1_URL")
-    self_hosted = bool(url) and url != system1.DEFAULT_URL
+    effective = url or system1.DEFAULT_URL
     key, src = system1.env_source("TYPESAFE_API_KEY")
     if key:
         return add("TYPESAFE_API_KEY", MUST1, OK, "%d chars, from %s" % (len(key), src))
-    if self_hosted:
+    if not system1.requires_key(effective):
         return add("TYPESAFE_API_KEY", MUST1, OK,
-                   "not set -- SYSTEM1_URL overridden to %s, no key needed" % url)
+                   "not set -- %s needs no key" % effective)
     where = ("environment, .env, or the registry" if WIN
              else "environment or .env")
     return add("TYPESAFE_API_KEY", MUST1, FAIL, "not in " + where, KEY_FIX)
@@ -145,10 +145,11 @@ def check_system1_target():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import system1
     url, src = system1.env_source("SYSTEM1_URL")
+    effective = url or system1.DEFAULT_URL
+    mode = "hosted Jev, needs a key" if system1.requires_key(effective) \
+        else "self-hosted, no key needed"
     if not url:
-        return add("tier-1 endpoint", OPT, OK,
-                   "default (hosted Jev, %s)" % system1.DEFAULT_URL)
-    mode = "default" if url == system1.DEFAULT_URL else "self-hosted override"
+        return add("tier-1 endpoint", OPT, OK, "default (%s, %s)" % (effective, mode))
     return add("tier-1 endpoint", OPT, OK, "%s -- %s (from %s)" % (url, mode, src))
 
 
@@ -170,7 +171,8 @@ def deep_system1():
                          "sensitive_path": "no", "found_in_graph": "no"})
     except Exception as e:                        # noqa: BLE001
         return add("tier-1 endpoint", MUST1, FAIL, "%s: %s" % (type(e).__name__, str(e)[:50]),
-                   "check TYPESAFE_API_KEY and SYSTEM1_URL")
+                   "is laya-serve running at the default URL? "
+                   "or set SYSTEM1_URL/TYPESAFE_API_KEY for a different vendor")
     model = r.get("model", "?")
     n = len(r.get("answers") or {})
     return add("tier-1 endpoint", MUST1, OK, "%s answered %d question(s)" % (model, n))
@@ -221,7 +223,7 @@ def main():
 
     w = max(len(r[0]) for r in rows)
     order = {MUST1: 0, MUST2: 1, REQ: 2, OPT: 3}
-    label = {MUST1: "MUST 1 -- TypeSafe API key",
+    label = {MUST1: "MUST 1 -- tier-1 access",
              MUST2: "MUST 2 -- Claude Code usable",
              REQ: "Required tooling", OPT: "Optional"}
     shown = None

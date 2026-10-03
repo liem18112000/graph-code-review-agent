@@ -38,7 +38,7 @@ flowchart LR
 | **Model spend** | Top model everywhere | Trivial hunks never reach a model; per-route model tiering is built but **off** until `--cheap-model` is set |
 | **Verification** | Every finding re-litigated by 3–5 skeptics | None; one cheap classifier call per finding assigns the verdict |
 | **Merge gate** | Depends on the model's wording that run | Fixed-shape record → reproducible `block\|fix\|note` |
-| **Setup** | None | graphify + git hook, plus tier-1 access (hosted key **or** self-hosted) |
+| **Setup** | None | graphify + git hook; tier 1 needs no key by default (self-hosted), only if you opt into a hosted vendor |
 | **Risk** | Slow, expensive | Stale graph or poor bundling silently costs recall |
 
 The cost and time wins are structural (less redundant work). **The quality claim is
@@ -49,12 +49,17 @@ not yet proven** — see [Status](#status). Full diagrams and the cost model:
 
 ## Requirements
 
-Two are **musts**, in this order:
+One is a **must**:
 
 | | Why |
 |---|---|
-| **1. Tier-1 access** — either `TYPESAFE_API_KEY` in the environment, **or** `SYSTEM1_URL` pointed at a self-hosted endpoint (e.g. `laya-serve`, no key needed) | Tier-1 triage. Pick one — see "Swapping the classifier". Neither configured → `review.py` exits 2. |
-| **2. Claude Code**, logged in | Runs the reviewer on your **subscription** — no `ANTHROPIC_API_KEY` |
+| **Claude Code**, logged in | Runs the reviewer on your **subscription** — no `ANTHROPIC_API_KEY` |
+
+Tier-1 triage needs nothing by default: it targets a self-hosted `laya-serve` at
+`http://localhost:8000/v1/systemone` out of the box, **no key required**. If
+that endpoint isn't actually running, tier 1 degrades to a full review rather
+than failing — see "Swapping the classifier" to point it elsewhere, or at the
+hosted Jev vendor (which does need `TYPESAFE_API_KEY`).
 
 Then the tooling:
 
@@ -81,22 +86,22 @@ is installed — it needs Python to run.**
 Output groups checks by priority and, on failure, tells you what to fix first:
 
 ```
-MUST 1 -- TypeSafe API key
-  [  ok  ] TYPESAFE_API_KEY      107 chars, from environment
+MUST 1 -- tier-1 access
+  [  ok  ] TYPESAFE_API_KEY      not set -- http://localhost:8000/v1/systemone needs no key
 MUST 2 -- Claude Code usable
   [  ok  ] claude                2.1.221 (Claude Code)
 Required tooling
   [  ok  ] python                3.12.1 (tomllib present)
   ...
 Optional
-  [  ok  ] tier-1 endpoint       default (hosted Jev, https://api.typesafe.ai/v1/systemone)
+  [  ok  ] tier-1 endpoint       default (http://localhost:8000/v1/systemone, self-hosted, no key needed)
   ...
 READY.
 ```
 
-Point `SYSTEM1_URL` at a self-hosted endpoint instead (see "Swapping the
-classifier") and the same `TYPESAFE_API_KEY` row reports `ok` with **no key
-set** — the gate tracks whichever mode is actually configured, not a fixed
+Point `SYSTEM1_URL` at the hosted Jev vendor instead (see "Swapping the
+classifier") and the `TYPESAFE_API_KEY` row becomes a real `FAIL` until one is
+set — the gate tracks whichever mode is actually configured, not a fixed
 vendor.
 
 Add `--deep` to prove the tier-1 endpoint answers and Claude auth works, rather
@@ -119,11 +124,12 @@ graphify update .          # build the graph
 graphify hook install      # keep it current on every commit
 ```
 
-Verify tier 1 is configured — either the key, or a self-hosted override:
+Nothing else required — tier 1 defaults to a self-hosted `laya-serve`, no key.
+If you want the hosted Jev vendor instead, set both:
 
 ```bash
-echo $TYPESAFE_API_KEY     # hosted Jev; see "Key resolution" below
-echo $SYSTEM1_URL          # self-hosted alternative (e.g. laya-serve); see "Swapping the classifier"
+echo $SYSTEM1_URL          # set to https://api.typesafe.ai/v1/systemone to opt in
+echo $TYPESAFE_API_KEY     # required only if you did
 ```
 
 ---
@@ -189,13 +195,17 @@ scanned from **source annotations** rather than inferred from graph topology.
 
 ## Key resolution
 
-`TYPESAFE_API_KEY` is read from the environment first, then from a `.env` beside
-the scripts, then (Windows only) the user registry where `setx` writes. A custom
-`SYSTEM1_URL` needs no key. A shell `export` does not survive into CI, a git hook, or another
-tool's subprocess — the `.env` fallback exists for exactly those cases.
+**No key by default.** Tier 1 targets a self-hosted `laya-serve` at
+`http://localhost:8000/v1/systemone` unless `SYSTEM1_URL` says otherwise.
+`TYPESAFE_API_KEY` only matters if you opt into the hosted Jev vendor — then
+it's read from the environment first, then from a `.env` beside the scripts,
+then (Windows only) the user registry where `setx` writes. A shell `export`
+does not survive into CI, a git hook, or another tool's subprocess — the
+`.env` fallback exists for exactly those cases.
 
 ```bash
 # .env  (gitignored — never commit this)
+SYSTEM1_URL=https://api.typesafe.ai/v1/systemone
 TYPESAFE_API_KEY=...
 ```
 
@@ -203,19 +213,21 @@ Two failure modes, handled differently on purpose:
 
 | Situation | Behaviour |
 |---|---|
-| Key absent *and* `SYSTEM1_URL` still default — **misconfiguration** | Exit 2 before any work, with the fix in the message |
-| Key present, endpoint down — **outage** | Degrade and **escalate**; never downgrades a bundle to the cheap tier |
+| Opted into the hosted Jev vendor, no key — **misconfiguration** | Exit 2 before any work, with the fix in the message |
+| Endpoint configured (default or otherwise) but unreachable — **outage** | Degrade and **escalate**; never downgrades a bundle to the cheap tier |
 
 ---
 
 ## Swapping the classifier
 
-Tier 1 is defined by an HTTP contract, not a vendor. Point it elsewhere with one
-variable:
+Tier 1 is defined by an HTTP contract, not a vendor. The default needs nothing
+running elsewhere to be *correct* — an unreachable default just degrades to a
+full review (above) — but for tier 1 to actually triage anything, point
+`SYSTEM1_URL` at wherever `laya-serve` actually runs, or at a different vendor:
 
 ```bash
-SYSTEM1_URL=https://api.typesafe.ai/v1/systemone   # default
-SYSTEM1_URL=http://localhost:8000/v1/systemone     # a self-hosted alternative
+SYSTEM1_URL=http://localhost:8000/v1/systemone     # default -- self-hosted, no key
+SYSTEM1_URL=https://api.typesafe.ai/v1/systemone   # opt-in -- hosted Jev, needs TYPESAFE_API_KEY
 ```
 
 The payload is a **compact structural record** — file and symbol names, caller
@@ -230,10 +242,9 @@ pip install "laya[serve]"
 laya-serve                 # listens on :8000, implements the same /v1/systemone contract
 ```
 
-Set `SYSTEM1_URL` (and leave `TYPESAFE_API_KEY` unset) and every script above
-picks it up unchanged — `ensure.py` reports which mode is configured under
-"tier-1 endpoint", and `review.py` / `agent.py` only require a key when
-`SYSTEM1_URL` is still the hosted default.
+Nothing else to configure — this *is* the default. `ensure.py` reports which
+mode is actually resolved under "tier-1 endpoint"; `review.py` / `agent.py`
+only require a key when `SYSTEM1_URL` points at the hosted vendor.
 
 ---
 

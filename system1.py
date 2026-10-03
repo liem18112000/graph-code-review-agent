@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Tier 1 -- the swappable system-1 slot (§4.1). Key in .env or the environment.
+"""Tier 1 -- the swappable system-1 slot (§4.1).
 
 Sends a COMPACT STRUCTURAL RECORD, never the diff: names travel, source does
 not, and `features` enforces that at runtime. Both questions use `choice`, the
 one primitive correct on both Jev and Laya (Laya's `noul` follows its option
-labels, #156). Point SYSTEM1_URL at a local laya-serve to swap vendor.
+labels, #156).
+
+**Self-hosted Laya is the default -- no key needed, works out of the box.**
+Point SYSTEM1_URL at JEV_HOSTED_URL (or anywhere else) to opt into a vendor
+that needs TYPESAFE_API_KEY instead. If the default endpoint isn't actually
+running, that is an OUTAGE, not a misconfiguration (§8): triage() degrades
+every bundle to `full` rather than failing the run.
 """
 from __future__ import annotations
 
@@ -14,8 +20,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
+DEFAULT_URL = "http://localhost:8000/v1/systemone"       # self-hosted laya-serve
+JEV_HOSTED_URL = "https://api.typesafe.ai/v1/systemone"  # opt-in; needs a key
+DEFAULT_MODEL = "laya"
 ENV_FILE = Path(__file__).with_name(".env")
+
+
+def requires_key(url: str) -> bool:
+    """Only the hosted Jev vendor needs TYPESAFE_API_KEY. Self-hosted -- the
+    default, or any other override -- needs nothing: an outage there just
+    degrades to a full review (route()), it never blocks the run."""
+    return url == JEV_HOSTED_URL
 
 
 def _registry(name: str) -> str:
@@ -177,10 +192,11 @@ def ask(state: dict, questions: dict | None = None, timeout: int = 20) -> dict:
     headers = {"Content-Type": "application/json"}
     if key := env("TYPESAFE_API_KEY"):
         headers["Authorization"] = f"Bearer {key}"
-    # `model` is required by the real API (422 without it). GET /v1/models
-    # lists what this key may use: jev-latest (stable), jev-preview.
+    # `model` is required by both vendors' APIs. Default is DEFAULT_MODEL
+    # ("laya", matching DEFAULT_URL); the hosted Jev vendor wants "jev-latest"
+    # or "jev-preview" -- set SYSTEM1_MODEL when overriding SYSTEM1_URL to it.
     req = urllib.request.Request(
-        url, json.dumps({"model": env("SYSTEM1_MODEL") or "jev-latest",
+        url, json.dumps({"model": env("SYSTEM1_MODEL") or DEFAULT_MODEL,
                          "state": state,
                          "questions": questions or QUESTIONS}).encode(),
         headers, method="POST")

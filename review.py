@@ -336,16 +336,17 @@ def main() -> int:
 
     if not a.no_system1:
         import system1                       # late: review.py works offline
-        # A missing key is MISCONFIGURATION -> fail loudly -- but only for the
-        # hosted Jev endpoint. A self-hosted SYSTEM1_URL (e.g. laya-serve) is
-        # the whole point of §4.1's swap: no key needed. A key whose endpoint
-        # is down is an OUTAGE -> §8 says degrade and escalate, which
+        # A missing key is MISCONFIGURATION -> fail loudly -- but only when
+        # opting into the hosted Jev vendor. The default (self-hosted Laya)
+        # needs no key at all; an unreachable default is an OUTAGE, not a
+        # misconfiguration -> §8 says degrade and escalate, which
         # triage()/route() already do.
         url, _ = system1.env_source("SYSTEM1_URL")
-        if not (url and url != system1.DEFAULT_URL) and not system1.env("TYPESAFE_API_KEY"):
+        if system1.requires_key(url or system1.DEFAULT_URL) and not system1.env("TYPESAFE_API_KEY"):
             print("TYPESAFE_API_KEY not found in environment, .env, or the "
-                  "Windows registry -- tier 1 is required; pass --no-system1 "
-                  "to skip", file=sys.stderr)
+                  "Windows registry -- required for the hosted Jev endpoint; "
+                  "unset SYSTEM1_URL to use the self-hosted default instead, "
+                  "or pass --no-system1 to skip tier 1 entirely", file=sys.stderr)
             return 2
         for b in res["bundles"]:
             b["triage"] = system1.triage(b)
