@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.2
+
+### Fixed — a large bundle could crash `agent.py` on Windows
+
+`review()` passed the whole bundle (facts, hunks, hints) as a `claude -p`
+CLI argument. Windows' `CreateProcess` has a command-line length ceiling
+(~32K); a real run hit it on 3 of 11 bundles with `WinError 206`, and the
+workaround — hand-sending those bundles to reviewers directly — cost 43%
+of that run's total tokens on its own.
+
+Fixed by sending the payload over stdin instead: `claude -p` already reads
+the prompt from stdin when no positional prompt is given, and stdin has no
+comparable length limit. Pinned by a new `test_agent.py` check that proves
+the bundle never appears in argv and reaches `communicate()` as `input`.
+
+### Fixed — the interactive skill was still pre-emptively disabling tier 1
+
+0.4.1 made self-hosted Laya the default — no key needed — but
+`skills/graph-review/SKILL.md` still carried its pre-0.4.1 instructions:
+check for `TYPESAFE_API_KEY` before running, and pass `--no-system1` if it
+looks absent. That flag disables tier 1 **entirely** (every bundle at full
+cost on the top model), which is a much larger loss than the one real
+problem a missing key can cause.
+
+The skill no longer checks for a key before running. It runs `review.py`
+plainly and reacts to the actual exit code: 0 means tier 1 ran (Laya or
+Jev); 2 means `SYSTEM1_URL` is explicitly set to the hosted Jev vendor with
+no key — the one genuine misconfiguration, and the skill now asks the user
+(via `AskUserQuestion`) whether to provide a key or fall back to the
+self-hosted default, instead of silently disabling tier 1.
+
 ## 0.4.1
 
 ### Changed — self-hosted Laya is now the default, not the opt-in

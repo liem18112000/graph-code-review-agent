@@ -65,15 +65,21 @@ async def review(bundle: dict, cwd: Path, timeout: int, cheap: str) -> list[dict
     payload = {k: bundle[k] for k in KEYS}
     if hints := hints_for(bundle):
         payload["hints"] = hints
+    # The prompt goes on STDIN, not argv: `claude -p` reads it from stdin when
+    # no positional prompt is given. A large bundle as a CLI argument hits the
+    # OS command-line length limit (Windows CreateProcess: ~32K; measured
+    # crashing real bundles with WinError 206) -- stdin has no such ceiling.
     proc = await asyncio.create_subprocess_exec(
-        "claude", "-p", json.dumps(payload, indent=2),
+        "claude", "-p",
         "--agent", AGENT, "--model", model,
         "--output-format", "json",
         "--permission-mode", "dontAsk",           # non-interactive: never block
-        cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=cwd, stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+        out, err = await asyncio.wait_for(
+            proc.communicate(json.dumps(payload, indent=2).encode()), timeout)
     except asyncio.TimeoutError:
         proc.kill()
         raise RuntimeError(f"timed out after {timeout}s")

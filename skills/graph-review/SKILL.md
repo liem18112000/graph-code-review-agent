@@ -35,12 +35,38 @@ python "${CLAUDE_PLUGIN_ROOT}/review.py" \
     --repo . > /tmp/bundles.json
 ```
 
-This runs tier 0 (free path globs + whitespace detection) **and** tier 1 (Jev
-triage) — tier 1 is on by default and needs `TYPESAFE_API_KEY` in the
-environment. Exit code 2 means the key is missing; `--no-system1` skips tier 1.
+This runs tier 0 (free path globs + whitespace detection) **and** tier 1 triage.
+Just run it — do not check for `TYPESAFE_API_KEY` first and do not pre-emptively
+add `--no-system1`. Tier 1 defaults to a self-hosted Laya classifier
+(`laya-serve` at `http://localhost:8000/v1/systemone`), which needs **no key at
+all**, so the common case needs nothing from you.
 
-Report `stats`: hunks dropped free, bundles produced, `system1_ok`, and
-`system1_usage` (tier-1 token spend).
+**Never add `--no-system1` just because a key looks absent.** That flag disables
+tier 1 *entirely* — every bundle then goes to the top model at full cost, which
+silently throws away the whole cost thesis of this plugin. A missing key is only
+ever a real problem in one specific case, and the command's own exit code tells
+you so:
+
+- **Exit 0** — tier 1 ran (against Laya, or against Jev if configured with a
+  key). Proceed to step 3 normally.
+- **Exit 2** — this repo's `SYSTEM1_URL` is explicitly set to the *hosted* Jev
+  vendor, and `TYPESAFE_API_KEY` is not set. This is the one real
+  misconfiguration. Ask the user, with `AskUserQuestion`, rather than guessing:
+
+  > No TypeSafe API key found, and this repo is configured to use the hosted
+  > Jev vendor. What would you like to do?
+  > 1. Provide a key now — save it to the environment, then retry with Jev.
+  > 2. Use the self-hosted Laya default instead — unset `SYSTEM1_URL`, then retry.
+
+  On (1), save the key the way the platform expects (`setx TYPESAFE_API_KEY
+  "<key>"` on Windows — tell the user to reopen their shell afterward;
+  `export TYPESAFE_API_KEY=<key>` added to the shell profile elsewhere) and
+  re-run step 2 unchanged. On (2), unset `SYSTEM1_URL` for this session and
+  re-run — tier 1 then runs against Laya, no key needed. Either way, re-run
+  the plain command again; do not fall back to `--no-system1`.
+
+Report `stats`: hunks dropped free, bundles produced, `system1_ok`,
+`graph_freshness`, and `system1_usage` (tier-1 token spend).
 
 ## 3. Dispatch
 

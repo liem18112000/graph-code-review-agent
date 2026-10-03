@@ -5,6 +5,9 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
+
 import agent
 
 
@@ -44,6 +47,37 @@ def test_hints_for_never_leaks_route_or_confidence_threshold():
           ["possible risk level: low (system-1 confidence 0.95)"]
 
 
+def test_review_sends_the_payload_via_stdin_not_argv(monkeypatch):
+    """The bug: a large bundle as a CLI argument hit Windows' command-line
+    length limit (WinError 206) on real runs. The fix is stdin, which has no
+    such ceiling -- so the huge bundle must never appear in argv, and must
+    reach communicate() as `input`."""
+    big_bundle = {"id": "b0", "package": "p", "sensitive": False,
+                  "facts": {"symbols": [{"symbol": f".m{i}()"} for i in range(2000)]},
+                  "hunks": []}
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+        async def communicate(self, input=None):
+            seen["input"] = input
+            return (json.dumps({"result": "[]", "usage": {},
+                               "modelUsage": {"opus": {}}}).encode(), b"")
+        def kill(self):
+            pass
+
+    async def fake_exec(*args, **kwargs):
+        seen["argv"] = args
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(agent.review(big_bundle, cwd=".", timeout=5, cheap="opus"))
+
+    argv_text = " ".join(str(a) for a in seen["argv"])
+    assert ".m1999()" not in argv_text          # the bundle never touches argv
+    assert b".m1999()" in seen["input"]         # it goes to stdin instead
+
+
 if __name__ == "__main__":
     class _MP:
         def setattr(self, obj, name, val):
@@ -51,4 +85,5 @@ if __name__ == "__main__":
     test_no_verdict_still_blocks()
     test_adjudicate_rejects_unexpected_choice(_MP())
     test_hints_for_never_leaks_route_or_confidence_threshold()
+    test_review_sends_the_payload_via_stdin_not_argv(_MP())
     print("ok")

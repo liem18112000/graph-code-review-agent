@@ -27,9 +27,9 @@ flowchart TD
     ROUTE --> LINT["--run-linters?<br/>review.py:368-370, 0.3.0, opt-in"]
     LINT --> JSON["bundles.json"]
 
-    JSON --> AG["agent.py main():191<br/>one claude -p per bundle"]
-    AG --> VERD["adjudicate():144<br/>tier 1 verdict per finding"]
-    VERD --> LINTF["lint_findings_from():135<br/>deterministic, no model, 0.3.0"]
+    JSON --> AG["agent.py main():197<br/>one claude -p per bundle"]
+    AG --> VERD["adjudicate():150<br/>tier 1 verdict per finding"]
+    VERD --> LINTF["lint_findings_from():141<br/>deterministic, no model, 0.3.0"]
     LINTF --> OUT["findings.json + accounting<br/>exit 1 on block or sensitive"]
 
     style T0 fill:#e6f4ea,stroke:#137333
@@ -339,14 +339,21 @@ Exit 2 if `claude` is not on PATH (`:170`).
 payload = {k: bundle[k] for k in KEYS}
 if hints := hints_for(bundle):
     payload["hints"] = hints
-"claude", "-p", json.dumps(payload, indent=2),
+"claude", "-p",
 "--agent", AGENT, "--model", model,
 "--output-format", "json",
 "--permission-mode", "dontAsk",
+# payload goes to communicate(json.dumps(payload).encode()) -- STDIN, not argv
 ```
 
 - **`claude -p` runs on the subscription**, not an API key. The only key in this
   system is `TYPESAFE_API_KEY`, and only for tier 1.
+- **0.4.2 fix — payload on stdin, not argv (`:72-84`).** A large bundle as a CLI
+  argument hit the OS command-line length limit on real runs (Windows
+  `CreateProcess`, ~32K: `WinError 206`, 3 of 11 bundles crashed and had to be
+  hand-sent in one measured run — 43% of that run's tokens). `claude -p` reads the
+  prompt from stdin when no positional prompt is given, which has no such ceiling.
+  Pinned by `test_agent.py`'s stdin-not-argv check.
 - **`--agent graph-reviewer`** loads `agents/graph-reviewer.md`, which carries the
   prompt *and* the `tools: Read` grant. The interactive skill uses the same
   definition, so both runtimes review identically.
@@ -362,7 +369,7 @@ if hints := hints_for(bundle):
 **This is one call, not an agent loop.** `review.py` already resolved the facts, so
 there is nothing for the model to discover. That is the cost thesis.
 
-### 3b. Error handling (`agent.py:83-86`)
+### 3b. Error handling (`agent.py:89-92`)
 
 ```python
 body = json.loads(out.decode() or "{}") if out else {}
@@ -371,46 +378,46 @@ if proc.returncode != 0 or body.get("is_error"):
 
 Claude Code reports failures as `is_error` in the JSON **on stdout**; stderr is usually
 empty. Reading stderr alone loses the message. A timeout kills the process
-(`:77-78`).
+(`:83-84`).
 
 ### 3c. Parsing — `findings_from()` (`agent.py:50`)
 
 `--output-format json` wraps the reply. `re.search(r"\[.*\]", text, re.S)` tolerates a
-code fence or surrounding prose. Each finding is tagged with its `bundle` id (`:97`),
+code fence or surrounding prose. Each finding is tagged with its `bundle` id (`:103`),
 which is how the verdict step later finds whether the bundle was sensitive.
 
-### 3d. Concurrency — `run()` (`agent.py:101`)
+### 3d. Concurrency — `run()` (`agent.py:107`)
 
 `asyncio.Semaphore` caps in-flight subprocesses; `gather` fans out. `one()` swallows
 per-bundle exceptions, prints them to stderr and returns `[], {}` — **one bundle must
 not sink the run**. The consequence: a failed bundle yields zero findings and no
 exit-code signal beyond its stderr line.
 
-### 3e. Ordering (`agent.py:220-222`)
+### 3e. Ordering (`agent.py:226-228`)
 
 Findings sort by: introduced before `pre_existing`, then `blocker > should_fix >
 nitpick`, then higher `confidence` first.
 
-### 3f. The verdict — `adjudicate()` (`agent.py:144`)
+### 3f. The verdict — `adjudicate()` (`agent.py:150`)
 
 For each finding, `system1.verdict()` is called. It is accepted only if
 `ok` **and** `confidence >= 0.70` **and** the choice is one of `block|fix|note`
-(`:155-156`). Otherwise `FALLBACK` (`:126`) maps the reviewer's own severity:
+(`:161-162`). Otherwise `FALLBACK` (`:132`) maps the reviewer's own severity:
 `blocker→block`, `should_fix→fix`, `nitpick→note`. `verdict_by` records which
 (`system1` or `fallback:<reason>`).
 
-Then a **deterministic clamp** (`:161`): `scope == "pre_existing"` and `block` →
+Then a **deterministic clamp** (`:167`): `scope == "pre_existing"` and `block` →
 `note`. A defect this diff did not introduce cannot gate its merge, whatever tier 1
 says.
 
-`--no-verdict` (`:223-230`) applies the same `FALLBACK` and clamp without calling
+`--no-verdict` (`:229-236`) applies the same `FALLBACK` and clamp without calling
 tier 1. `test_agent.py` pins this path.
 
-**0.3.0:** lint findings (`lint_findings_from()`, `:132-141`) bypass both this step
-and system 2 entirely — they already carry a verdict from `LINT_VERDICT`
+**0.3.0:** lint findings (`lint_findings_from()`, `:141-147`) bypass both this step
+and system 2 entirely — they already carry a verdict from `LINT_VERDICT` (`:138`)
 (error→fix, warning/info→note) before they ever reach `main()`'s sort.
 
-### 3g. Exit code — `agent.py:253`
+### 3g. Exit code — `agent.py:259`
 
 ```python
 return 1 if blockers or sensitive else 0
@@ -422,7 +429,7 @@ a human even with zero findings.
 
 ---
 
-## Token accounting — `accounting()` (`agent.py:168`)
+## Token accounting — `accounting()` (`agent.py:174`)
 
 Printed to stderr as JSON. Tier-1 triage totals come from `stats.system1_usage`
 (summed in `review.py`), plus `verdict_calls` and `verdict_tokens` from the
