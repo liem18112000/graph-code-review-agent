@@ -28,7 +28,7 @@ Shaped as **one agent plus one script**, not an orchestration service.
 > | Facts from graph, bundled | **Built**, bundled by *package directory* |
 > | Tier 1 risk triage + routing | **Built**; routes the model and, with `--gate`, reorders the queue |
 > | Tier 1 skips low-risk bundles | **Not built, deliberately** — every surviving bundle reaches system 2; skipping it is gated on §7's benchmark proving lever 1 holds quality alone, which it has not yet |
-> | Model tiering (cheap model on `light`) | **Built but inert** — `--cheap-model` defaults to `opus` |
+> | Model tiering (cheap model on `light`) | **Built, off by default** — `--cheap-model` defaults to `opus`; set it to actually use the lever. **0.4.5:** `full` (where most bundles actually land) got the same kind of flag, `--model` — it was hardcoded with no override at all before this |
 > | Tier 1 verdict `block/fix/note` | **Built** (`agent.py adjudicate`) |
 > | Separate verifier for suspicious findings | **Not built, deliberately** — redesigned away in favour of lever 3 (§2); re-introducing it is an open question (§12), not a forgotten task |
 > | Second independent reviewer on high-risk bundles | **Not built, deliberately** — the mitigation *if* §10's benchmark shows lens fan-out matters; it has not yet discriminated either way |
@@ -50,6 +50,10 @@ Shaped as **one agent plus one script**, not an orchestration service.
 > | Cross-platform preflight reporting which tier-1 mode is configured | **Built** — `ensure.py`/`.sh`/`.ps1`, `--deep` probes the real endpoint |
 > | Tier-1 verdict choice validated against `block\|fix\|note` | **Fixed in 0.3.0** — an unrecognised choice used to pass straight through to the gate |
 > | `--no-verdict` actually affects the exit code | **Fixed in 0.3.0** — it used to leave `verdict` unset on every finding, so blockers always counted zero |
+> | `full` route model, configurable | **Built in 0.4.5** — `--model`; was hardcoded `"opus"` with no flag at all, same bug class as the cheap-model lever but never given one |
+> | Search tool for sensitive/`human+top` bundles | **Built in 0.4.6** — `agents/graph-reviewer-deep.md`, a *separate* agent definition with `tools: Read, Grep, Glob` (structural grant; `--allowedTools` does not widen an agent's own declared tools, verified live). Not the deferred "second independent reviewer" row above — this is one reviewer gaining search, not two reviewers on the same bundle |
+> | Running both methods and merging results | **Built in 0.4.6** — `merge_findings.py` plus a documented optional skill step; three independent real comparisons all concluded "running both finds more" before this existed as anything but a by-hand exercise |
+> | Fine-tune Laya on PR history | **Partly built in 0.4.6, and partly not buildable at all.** The installed `laya` package has no weight-training entry point — checked, none exists; real fine-tuning needs the model's own HF training scripts, outside this package. What *is* built: `feedback.py export-eval` turns labelled accept/dismiss rows into a real `laya-evals`-format dataset (verified against the actual tool's `validate` command) — the measurement half, not the training half. `laya.calibrate`'s temperature fitting is a third, separate thing this still doesn't do: it needs raw logits our HTTP integration never sees, and a 2000-example-per-bucket floor this log won't reach soon |
 
 > **Supersedes** the previous revision's §9.5, which argued a flat-rate subscription
 > weakened the case for cheap triage. Token cost is now an explicit goal, so triage is a
@@ -377,14 +381,25 @@ flowchart TD
 
 | Route | Model (`agent.py`) | Human |
 |---|---|---|
-| `human+top` | `opus` | yes — any sensitive bundle makes `agent.py` exit 1 |
-| `full` | `opus` | no |
+| `human+top` | `opus`, always | yes — any sensitive bundle makes `agent.py` exit 1 |
+| `full` | `--model` (default `opus`) | no |
 | `light` | `--cheap-model` (default `opus`) | no |
 
-`--cheap-model` defaults to `opus` because the development account cannot reach
-`sonnet`, so **the tiering lever is built but inert** until a cheaper model is
-configured. `agent.py` prints a note on stderr when `light` bundles ran at full
-cost. There is no per-route `effort` setting.
+**0.4.5: `full` is now a flag, not a hardcode.** It used to be unconditionally
+`"opus"` with no override, same as `human+top` — but `human+top` is meant to
+stay pinned (highest-risk, needs a human regardless, so quality there is never
+a cost trade-off), while `full` was only hardcoded by omission. Since Laya's
+routing confidence rarely clears the 0.70/0.95 floors (§4.1), `full` is where
+most bundles actually land, so that hardcode was most of the real spend in
+every measured comparison (§10) — graph review cost 2–3x `/code-review`
+running on Sonnet, substantially *because* this flag didn't exist yet.
+
+Both flags default to `opus`, so behaviour is unchanged unless set. **Verified
+on this account** (2026-10, `claude -p --model sonnet`): `sonnet` resolves to
+`claude-sonnet-5-5` correctly — the earlier claim here that "the account
+cannot reach sonnet" does not hold on this account today; that may have been
+true at an earlier plan tier, or may differ on another account. Confirm on
+yours before relying on it. There is still no per-route `effort` setting.
 
 ### 4.1 System 1 is a swappable slot
 
@@ -942,6 +957,41 @@ under nine false positives is worth less than one at the top. A missing findings
 counts as a **miss**, never a skip, so an arm that crashes on a bug cannot be flattered by
 its own failure.
 
+### 10.2 Real comparisons against `/code-review` — by hand, not `bench.py`
+
+Three independent runs, same target (`liem-leo-customer360`, commits `fa11a00` +
+`1faca32`), each with a human comparing graph review's output against Claude's own
+`/code-review high` on the identical diff. Not `bench.py` — these predate and partly
+motivated several fixes above (the Laya confidence bug in particular was *found* by
+the second run and *validated fixed* by the third). Numbers varied run to run (model
+variance, which bundles crashed, whether tier 1 even ran) enough that exact figures
+from one run do not generalise — what repeated across all three did:
+
+- **Near-zero overlap, complementary blind spots.** Each run found only 2–4 issues in
+  common out of 15–20 distinct ones. Graph review was consistently strong on seed/data
+  semantics and sensitive-path flagging; `/code-review` was consistently strong on
+  cross-file consequences (an exposed route documented only in an nginx config, a shell
+  script's health-check gating the whole bootstrap) that graph review's bundle-scoped,
+  search-free reviewer structurally could not see before `graph-reviewer-deep` (§4,
+  0.4.6) existed.
+- **Graph review cost more per run** — roughly 2–3x `/code-review`'s tokens in every
+  run — substantially because the `full` route (where most bundles land while tier-1
+  confidence is low) was hardcoded to the top model with no flag until 0.4.5, not
+  because the architecture requires it.
+- **Every run independently concluded "running both finds more."** That conclusion is
+  why `merge_findings.py` and the optional cross-check skill step (§5 of the skill)
+  exist as of 0.4.6, instead of being a by-hand exercise each time.
+- **One real bug found this way, not by reasoning:** the second run showed every
+  tier-1 verdict falling back (`fallback:low-confidence`) despite Laya answering every
+  question. Investigating *why* — not assuming Laya was just weak — found the
+  confidence-field bug fixed in 0.4.3 (§4.1). The third run confirmed the fix live:
+  Laya went from deciding 0 verdicts to deciding some.
+
+These runs are evidence, not a benchmark: one human, one comparison target, no
+replication, nothing re-verified in code except where stated. They motivated real
+fixes precisely because they were real and specific, which is more than `bench.py`'s
+own saturated metric (§10.1, [benchmark.md](benchmark.md)) has managed to be so far.
+
 ---
 
 ## 11. Build order and file manifest
@@ -975,25 +1025,29 @@ rather than step 7.
 
 | File | Lines | Purpose |
 |---|---|---|
-| `review.py` | 378 | diff → hunks → facts → bundles → tier-1 triage → ranked JSON; graph freshness, `path_to_sensitive`, `--run-linters` (0.3.0) |
-| `agent.py` | 257 | bundles → one `claude -p` per bundle → findings → tier-1 verdict → exit code; hints to the reviewer, lint findings merged in (0.3.0) |
-| `system1.py` | 232 | `POST /v1/systemone` client, questions, `route()`. The swap seam (§4.1). |
+| `review.py` | 379 | diff → hunks → facts → bundles → tier-1 triage → ranked JSON; graph freshness, `path_to_sensitive`, `--run-linters` (0.3.0) |
+| `agent.py` | 297 | bundles → one `claude -p` per bundle → findings → tier-1 verdict → exit code; hints, lint findings merged in (0.3.0); `--model` for `full`, deep-agent dispatch for sensitive/`human+top` (0.4.5–0.4.6) |
+| `system1.py` | 283 | `POST /v1/systemone` client, questions, `route()`. The swap seam (§4.1). `verdict()` returns `state` for `feedback.py export-eval` (0.4.6). |
 | `diffparse.py` | 73 | Unified-diff parsing, shared by review + bench |
 | `bench.py` | 163 | Task prep (own git history) + localization scoring (§10.1) + `selftest`; Defects4J path cut in 0.3.0 |
 | `rank_queue.py` | 103 | Rank refs by aggregate risk, no graphify flag needed (§9.5) |
 | `mcp_server.py` | 173 | Hand-rolled stdio MCP server exposing `review_diff`/`rank_queue` (§9.5) |
-| `feedback.py` | 145 | Log + summarise human accept/dismiss per finding (§8) |
-| `ensure.py` (+ `.sh`, `.ps1`) | 252 | Preflight: key, `claude`, Python, `graphify`, `git`; `--deep` probes live; reports which tier-1 mode is configured |
-| `test_agent.py` | 54 | Self-check for the merge-gate fallback logic, including `hints_for()` |
+| `merge_findings.py` | 121 | Merge two findings lists (graph review + `/code-review`) into found-by-both / only-each (§10.2, 0.4.6) |
+| `feedback.py` | 220 | Log + summarise human accept/dismiss per finding (§8); `export-eval` writes a real `laya-evals` dataset (0.4.6) |
+| `ensure.py` (+ `.sh`, `.ps1`) | 262 | Preflight: key, `claude`, Python, `graphify`, `git`; `--deep` probes live; checks both agent definitions (0.4.6) |
+| `test_agent.py` | 123 | Self-check: merge-gate fallback, `hints_for()`, stdin-not-argv, deep-agent dispatch |
 | `test_review.py` (+ `test_fake_linter.py`) | 100 | Self-check for `hops_to_sensitive`, `graph_freshness`, `run_linters` |
-| `agents/graph-reviewer.md` | 143 | The agent. Prompt and `tools: Read`, not program. Complexity dimension + hints (0.3.0). |
-| `skills/graph-review/SKILL.md` | 103 | Interactive entry: check graph, run `review.py`, run `agent.py`, report |
+| `test_system1.py` | 78 | Self-check for the `answer_confidence` vs `confidence` fallback |
+| `agents/graph-reviewer.md` | 153 | The common-case agent. Prompt and `tools: Read`, not program. Complexity dimension + hints (0.3.0). |
+| `agents/graph-reviewer-deep.md` | 141 | Sensitive/`human+top` only. Same prompt plus `tools: Read, Grep, Glob` and cross-file-consequence guidance (0.4.6). |
+| `skills/graph-review/SKILL.md` | 164 | Interactive entry: check graph, run `review.py`, run `agent.py`, report, optional `/code-review` cross-check (0.4.6) |
 | `overrides.toml` | 51 | Tier-0 sensitive / skip / test globs, optional `[[linters]]` |
 
-Line counts are as of the 0.3.0 tree. Runnable self-checks are now
-`test_agent.py` (merge gate, `hints_for`), `test_review.py` (graph logic),
-and each script's own `selftest` subcommand (`bench.py`, `feedback.py`,
-`rank_queue.py`, `mcp_server.py`) — all synthetic, none need network,
+Line counts are as of the 0.4.6 tree. Runnable self-checks are now
+`test_agent.py` (merge gate, `hints_for`, dispatch), `test_review.py` (graph
+logic), `test_system1.py` (confidence field), and each script's own
+`selftest` subcommand (`bench.py`, `feedback.py`, `rank_queue.py`,
+`mcp_server.py`, `merge_findings.py`) — all synthetic, none need network,
 `defects4j`, or a real `claude -p` call.
 
 ### Built, with deviations from this document
@@ -1078,5 +1132,7 @@ CI, the agent runtime, `ReportFindings`.
   findings" to "classify every finding cheaply". Nothing re-checks a finding's truth, so a
   confident false positive from system 2 passes straight to the verdict.
 - **When does the cheap model turn on?** The `light` route needs confidence ≥ 0.95 and
-  risk `low`; no bundle has cleared it yet, and the account cannot reach a cheaper model.
+  risk `low`; with Laya as the default (§4.1), no bundle has cleared that bar yet in any
+  measured run, so `--cheap-model` stays unexercised regardless of account access to a
+  cheaper model (verified reachable on this account, 0.4.5 — see §4).
 - **Target service.** §9 measures `acme-orders`. A non-CDI codebase changes §9.2 substantially.

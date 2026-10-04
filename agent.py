@@ -20,11 +20,28 @@ import sys
 from pathlib import Path
 
 AGENT = "graph-reviewer"
+# Search tools, structurally granted (a separate agent definition, not a CLI
+# flag -- --allowedTools does not widen an agent's own `tools:` frontmatter;
+# verified live before building this). Dispatched only for sensitive/human+top
+# bundles: real comparisons measured graph-reviewer missing cross-file
+# consequences (an exposed route documented only in an nginx config, a shell
+# script's health-check gating the whole bootstrap) that a search would catch,
+# and this is the one tier where that extra cost is already being paid.
+AGENT_DEEP = "graph-reviewer-deep"
 
-# Routes that get the cheap tier (§4's model-tiering cost lever). Measured on
-# this account, `--model sonnet` resolves to a model it cannot access, so the
-# lever defaults off -- pass --cheap-model sonnet where it is available.
+# Routes that get the cheap tier (§4's model-tiering cost lever).
 CHEAP_ROUTES = {"light"}
+# `human+top` alone always gets the top model, matching the documented route
+# table (§4): it is the highest-risk tier and needs a human regardless, so
+# quality there is not a cost trade-off. `full` used to be hardcoded to
+# "opus" too, with no flag -- and since Laya's routing confidence rarely
+# clears the 0.70/0.95 floors (§4.1), `full` is where most bundles actually
+# land, so that hardcode was most of the real spend in every measured run.
+TOP_ROUTES = {"human+top"}
+# Bundles dispatched to AGENT_DEEP instead of AGENT -- route OR sensitive,
+# not just route, because a sensitive bundle that hasn't yet been triaged
+# (tier 1 down, or --no-system1) still deserves the deeper reviewer.
+DEEP_ROUTES = TOP_ROUTES
 
 KEYS = ("id", "package", "sensitive", "facts", "hunks")
 
@@ -60,8 +77,10 @@ def findings_from(stdout: str) -> list[dict]:
     return json.loads(m.group(0)) if m else []
 
 
-async def review(bundle: dict, cwd: Path, timeout: int, cheap: str) -> list[dict]:
-    model = cheap if bundle.get("route") in CHEAP_ROUTES else "opus"
+async def review(bundle: dict, cwd: Path, timeout: int, cheap: str, full: str) -> list[dict]:
+    route = bundle.get("route")
+    model = cheap if route in CHEAP_ROUTES else "opus" if route in TOP_ROUTES else full
+    agent = AGENT_DEEP if (route in DEEP_ROUTES or bundle.get("sensitive")) else AGENT
     payload = {k: bundle[k] for k in KEYS}
     if hints := hints_for(bundle):
         payload["hints"] = hints
@@ -71,7 +90,7 @@ async def review(bundle: dict, cwd: Path, timeout: int, cheap: str) -> list[dict
     # crashing real bundles with WinError 206) -- stdin has no such ceiling.
     proc = await asyncio.create_subprocess_exec(
         "claude", "-p",
-        "--agent", AGENT, "--model", model,
+        "--agent", agent, "--model", model,
         "--output-format", "json",
         "--permission-mode", "dontAsk",           # non-interactive: never block
         cwd=cwd, stdin=asyncio.subprocess.PIPE,
@@ -91,7 +110,13 @@ async def review(bundle: dict, cwd: Path, timeout: int, cheap: str) -> list[dict
         msg = str(body.get("result") or err.decode(errors="replace")).strip()
         raise RuntimeError(msg[:200] or f"exit {proc.returncode}")
     u = body.get("usage") or {}
-    usage = {"model": next(iter(body.get("modelUsage") or {}), model),
+    # `modelUsage` often has more than one key -- Claude Code makes small
+    # incidental calls (e.g. a title) on a different, cheaper model. The
+    # first key is not reliably the one that actually reviewed; the one
+    # with the most output tokens is the real reviewer call.
+    mu = body.get("modelUsage") or {}
+    reviewer_model = max(mu, key=lambda k: mu[k].get("outputTokens", 0), default=model)
+    usage = {"model": reviewer_model,
              "input_tokens": u.get("input_tokens", 0),
              "output_tokens": u.get("output_tokens", 0),
              "cache_read_input_tokens": u.get("cache_read_input_tokens", 0),
@@ -105,13 +130,13 @@ async def review(bundle: dict, cwd: Path, timeout: int, cheap: str) -> list[dict
 
 
 async def run(bundles: list[dict], cwd: Path, concurrency: int,
-              timeout: int, cheap: str) -> list[dict]:
+              timeout: int, cheap: str, full: str) -> list[dict]:
     sem = asyncio.Semaphore(concurrency)
 
     async def one(b):
         async with sem:
             try:
-                return await review(b, cwd, timeout, cheap)
+                return await review(b, cwd, timeout, cheap, full)
             except Exception as e:                # one bundle must not sink the run
                 print(f"{b['id']}: {type(e).__name__}: {e}", file=sys.stderr)
                 return [], {}
@@ -162,6 +187,11 @@ def adjudicate(findings: list[dict], bundles: list[dict]) -> list[dict]:
               and v.get("verdict") in ("block", "fix", "note"))
         f["verdict"] = v["verdict"] if ok else FALLBACK.get(f.get("severity"), "fix")
         f["verdict_by"] = "system1" if ok else "fallback:" + str(v.get("error", "low-confidence"))[:60]
+        # kept so a human correction can later become a labelled laya-evals
+        # example (feedback.py export-eval) -- the flattened record IS the
+        # `state` that question was actually asked against
+        if state := v.get("state"):
+            f["tier1_state"] = state
         # deterministic clamp, not a model's call: a defect this diff did not
         # introduce cannot gate its merge however bad it is
         if f.get("scope") == "pre_existing" and f["verdict"] == "block":
@@ -205,8 +235,12 @@ def main() -> int:
     ap.add_argument("--no-verdict", action="store_true",
                     help="skip tier-1 adjudication; keep the reviewer's severity")
     ap.add_argument("--cheap-model", default="opus",
-                    help="model for low-risk bundles; 'sonnet' enables the "
-                         "tiering cost lever where the account has access")
+                    help="model for 'light' bundles (low risk, high tier-1 confidence)")
+    ap.add_argument("--model", default="opus",
+                    help="model for 'full' bundles -- everything that isn't 'light' or "
+                         "'human+top'. This is most bundles while tier-1 confidence is "
+                         "low (§4.1), so it is the main cost lever; 'human+top' always "
+                         "gets the top model regardless of this flag")
     a = ap.parse_args()
 
     if not shutil.which("claude"):
@@ -218,7 +252,7 @@ def main() -> int:
                      else Path(a.bundles).read_text("utf-8"))
     bundles = doc["bundles"]
     findings, usage = asyncio.run(run(bundles, a.repo, a.concurrency,
-                                      a.timeout, a.cheap_model))
+                                      a.timeout, a.cheap_model, a.model))
 
     rank = {"blocker": 0, "should_fix": 1, "nitpick": 2}
     # pre-existing defects are real but the author of this diff cannot act on

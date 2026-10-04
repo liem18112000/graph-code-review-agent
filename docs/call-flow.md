@@ -1,6 +1,6 @@
 # Call Flow — how one review actually runs
 
-Implementation walkthrough. Every reference is `file:line` against the 0.4.1 code.
+Implementation walkthrough. Every reference is `file:line` against the 0.4.6 code.
 For *why* it is built this way, see `architecture.md`; this document is *what calls
 what*. If a line number here has drifted, the function name beside it is the anchor.
 
@@ -23,13 +23,13 @@ flowchart TD
     T0 -->|"13 survive"| FACTS["facts + bundles<br/>build():228-291"]
 
     FACTS --> T1["tier 1 triage<br/>review.py:350-352"]
-    T1 --> ROUTE["route()<br/>system1.py:228"]
+    T1 --> ROUTE["route()<br/>system1.py:250"]
     ROUTE --> LINT["--run-linters?<br/>review.py:368-370, 0.3.0, opt-in"]
     LINT --> JSON["bundles.json"]
 
-    JSON --> AG["agent.py main():197<br/>one claude -p per bundle"]
-    AG --> VERD["adjudicate():150<br/>tier 1 verdict per finding"]
-    VERD --> LINTF["lint_findings_from():141<br/>deterministic, no model, 0.3.0"]
+    JSON --> AG["agent.py main():227<br/>one claude -p per bundle"]
+    AG --> VERD["adjudicate():175<br/>tier 1 verdict per finding"]
+    VERD --> LINTF["lint_findings_from():166<br/>deterministic, no model, 0.3.0"]
     LINTF --> OUT["findings.json + accounting<br/>exit 1 on block or sensitive"]
 
     style T0 fill:#e6f4ea,stroke:#137333
@@ -197,13 +197,13 @@ sequenceDiagram
     R->>S: requires_key(effective url) :345, see system1.py:29-33
     Note over R: opted into hosted Jev with no key -> exit 2
     loop per bundle
-        R->>S: triage(bundle) :207
-        S->>S: features(bundle) :161
-        Note over S: _no_source() guard :181
-        S->>J: POST /v1/systemone  ask():190
+        R->>S: triage(bundle) :228
+        S->>S: features(bundle) :182
+        Note over S: _no_source() guard :202
+        S->>J: POST /v1/systemone  ask():211
         J-->>S: answers + usage
         S-->>R: risk, confidence, security_concern, usage
-        R->>S: route(triage, sensitive) :228
+        R->>S: route(triage, sensitive) :250
     end
     Note over R: with --gate, sort by route then risk_hint :364-366
 ```
@@ -226,7 +226,7 @@ one case that still needs `TYPESAFE_API_KEY`.
 | Default or any other self-hosted `SYSTEM1_URL` | No key required; the swap seam of §4.1. |
 | Endpoint configured but unreachable — **outage** | `triage()` returns `ok: false`; `route()` returns `full`. Never downgrades. |
 
-### 2b. The payload — `features()` (`system1.py:161`)
+### 2b. The payload — `features()` (`system1.py:182`)
 
 Nine scalar fields, ~70 tokens. **No diff, no source.** Names and counts travel.
 
@@ -239,13 +239,13 @@ Nine scalar fields, ~70 tokens. **No diff, no source.** Names and counts travel.
  "covering_tests": 0, "sensitive_path": "yes", "found_in_graph": "yes"}
 ```
 
-**`_no_source()` (`:181`) is a runtime guard, not a test.** Every field is a
+**`_no_source()` (`:202`) is a runtime guard, not a test.** Every field is a
 single-line name or count, so a `@@` or an escaped newline in the serialised record
 means diff text got in, and it raises `ValueError`. The same guard wraps the verdict
 record (2f). This is what makes a closed external vendor acceptable against a
 proprietary codebase — and is unconditional even against the self-hosted default.
 
-### 2c. The request — `ask()` (`system1.py:190`)
+### 2c. The request — `ask()` (`system1.py:211`)
 
 ```json
 {"model": "laya", "state": {...}, "questions": {...}}
@@ -275,7 +275,7 @@ The disambiguation that mattered: *"Treat max_callers 'unknown' as UNMEASURED, n
 zero"*, and *"entry_point, not unknown_callers, is the authority on whether the runtime
 invokes this code"*.
 
-### 2e. Routing — `route()` (`system1.py:228`)
+### 2e. Routing — `route()` (`system1.py:250`)
 
 Evaluated top-down; **every absence of signal escalates**:
 
@@ -308,13 +308,17 @@ Real result on the reference diff (from the earlier tier-1 instructions) — not
 b000 is the design working: tier 1 said *low* but wasn't sure, so it escalated rather
 than downgrading.
 
-### 2f. The verdict — `verdict()` (`system1.py:143`)
+### 2f. The verdict — `verdict()` (`system1.py:161`)
 
 Called later from `agent.py`, not from `review.py`. Builds a six-field record
 (`severity_claimed`, `scope`, `reviewer_confidence`, `summary`, `failure`,
 `sensitive_path`), each passed through `flat()` (`:137`, one line, 240 chars), checks
 it with `_no_source()`, and asks `Q_VERDICT` (`:116`) for `block | fix | note`. It
 **never raises**: an outage returns `{"ok": False, ...}` so the caller can fall back.
+**0.4.6:** the same `rec` rides along as `state` on both the success and the
+exception path, so a later human correction can become a labelled `laya-evals`
+example (`feedback.py export-eval`) — see `agent.py:193` (3f) and
+`docs/architecture.md` §4.1.
 
 ### 2g. Stats
 
@@ -328,19 +332,19 @@ it with `_no_source()`, and asks `Q_VERDICT` (`:116`) for `block | fix | note`. 
 
 ```
 python agent.py --bundles bundles.json --repo . [--concurrency 4] [--timeout 600]
-                [--cheap-model opus] [--no-verdict]
+                [--cheap-model opus] [--model opus] [--no-verdict]
 ```
 
 Exit 2 if `claude` is not on PATH (`:170`).
 
-### 3a. One subprocess per bundle — `review()` (`agent.py:63`)
+### 3a. One subprocess per bundle — `review()` (`agent.py:80`)
 
 ```python
 payload = {k: bundle[k] for k in KEYS}
 if hints := hints_for(bundle):
     payload["hints"] = hints
 "claude", "-p",
-"--agent", AGENT, "--model", model,
+"--agent", agent, "--model", model,
 "--output-format", "json",
 "--permission-mode", "dontAsk",
 # payload goes to communicate(json.dumps(payload).encode()) -- STDIN, not argv
@@ -348,28 +352,40 @@ if hints := hints_for(bundle):
 
 - **`claude -p` runs on the subscription**, not an API key. The only key in this
   system is `TYPESAFE_API_KEY`, and only for tier 1.
-- **0.4.2 fix — payload on stdin, not argv (`:72-84`).** A large bundle as a CLI
+- **0.4.2 fix — payload on stdin, not argv (`:87-103`).** A large bundle as a CLI
   argument hit the OS command-line length limit on real runs (Windows
   `CreateProcess`, ~32K: `WinError 206`, 3 of 11 bundles crashed and had to be
   hand-sent in one measured run — 43% of that run's tokens). `claude -p` reads the
   prompt from stdin when no positional prompt is given, which has no such ceiling.
   Pinned by `test_agent.py`'s stdin-not-argv check.
-- **`--agent graph-reviewer`** loads `agents/graph-reviewer.md`, which carries the
-  prompt *and* the `tools: Read` grant. The interactive skill uses the same
-  definition, so both runtimes review identically.
-- **`KEYS`** (`:29`) sends only `id, package, sensitive, facts, hunks`. `route` and
-  the confidence value are **never** sent. **0.3.0:** `hints_for()` (`:32`) adds an
+- **0.4.6 — `agent`, not a constant (`:83`).** `AGENT_DEEP` (`:30`) if `route` is in
+  `DEEP_ROUTES = TOP_ROUTES` (`:44`) or the bundle is `sensitive`, else `AGENT`
+  (`:22`). `AGENT_DEEP` loads `agents/graph-reviewer-deep.md` — a *separate* agent
+  definition with `tools: Read, Grep, Glob`, granted structurally, not via
+  `--allowedTools` (verified live: that flag does not widen an agent's own declared
+  tools). Dispatched only here because real comparisons measured the search-free
+  reviewer missing cross-file consequences — an exposed route documented only in an
+  nginx config, a shell script's health check gating the whole bootstrap — and this
+  is the one tier already paying the expensive-reviewer cost.
+- **`--agent`** loads the picked definition, which carries the prompt *and* the tool
+  grant. The interactive skill uses the same definitions, so both runtimes review
+  identically.
+- **`KEYS`** (`:46`) sends only `id, package, sensitive, facts, hunks`. `route` and
+  the confidence value are **never** sent. **0.3.0:** `hints_for()` (`:49`) adds an
   optional `hints` array — only `risk` and `security_concern`, reframed as claims to
   verify, never as a conclusion system 2 inherits. Empty when tier 1 was down or
   skipped, so a missing `hints` key is not itself a signal.
 - **`dontAsk`** — a permission prompt in a non-interactive run is a hang.
-- **Model** (`:64`): `--cheap-model` if `route` is in `CHEAP_ROUTES = {"light"}`
-  (`:27`), else `opus`. Default `--cheap-model` is `opus`, so the lever is inert.
+- **Model** (`:82`): `--cheap-model` if `route` is in `CHEAP_ROUTES = {"light"}`
+  (`:33`); `"opus"`, always, if `route` is in `TOP_ROUTES = {"human+top"}` (`:40`);
+  otherwise `--model`, for `full` — **0.4.5: this used to be hardcoded `"opus"`
+  with no flag at all.** Both flags default to `opus`, so cost tiering is off
+  until set, but it is now possible to set.
 
 **This is one call, not an agent loop.** `review.py` already resolved the facts, so
 there is nothing for the model to discover. That is the cost thesis.
 
-### 3b. Error handling (`agent.py:89-92`)
+### 3b. Error handling (`agent.py:108-109`)
 
 ```python
 body = json.loads(out.decode() or "{}") if out else {}
@@ -378,46 +394,55 @@ if proc.returncode != 0 or body.get("is_error"):
 
 Claude Code reports failures as `is_error` in the JSON **on stdout**; stderr is usually
 empty. Reading stderr alone loses the message. A timeout kills the process
-(`:83-84`).
+(`:102-103`).
 
-### 3c. Parsing — `findings_from()` (`agent.py:50`)
+**0.4.5:** `modelUsage` (`:117-118`) often has more than one key — Claude Code makes
+small incidental calls (e.g. a title) on a cheaper model alongside the real review.
+The first key is not reliably the reviewer; `max(mu, key=...outputTokens)` is (`:118`).
+A real run reported `claude-haiku-4-5-20251001` as the model for a bundle actually
+reviewed by Sonnet, because haiku's incidental call happened to sort first in the dict.
+
+### 3c. Parsing — `findings_from()` (`agent.py:67`)
 
 `--output-format json` wraps the reply. `re.search(r"\[.*\]", text, re.S)` tolerates a
-code fence or surrounding prose. Each finding is tagged with its `bundle` id (`:103`),
+code fence or surrounding prose. Each finding is tagged with its `bundle` id (`:128`),
 which is how the verdict step later finds whether the bundle was sensitive.
 
-### 3d. Concurrency — `run()` (`agent.py:107`)
+### 3d. Concurrency — `run()` (`agent.py:132`)
 
 `asyncio.Semaphore` caps in-flight subprocesses; `gather` fans out. `one()` swallows
 per-bundle exceptions, prints them to stderr and returns `[], {}` — **one bundle must
 not sink the run**. The consequence: a failed bundle yields zero findings and no
 exit-code signal beyond its stderr line.
 
-### 3e. Ordering (`agent.py:226-228`)
+### 3e. Ordering (`agent.py:260-262`)
 
 Findings sort by: introduced before `pre_existing`, then `blocker > should_fix >
 nitpick`, then higher `confidence` first.
 
-### 3f. The verdict — `adjudicate()` (`agent.py:150`)
+### 3f. The verdict — `adjudicate()` (`agent.py:175`)
 
 For each finding, `system1.verdict()` is called. It is accepted only if
 `ok` **and** `confidence >= 0.70` **and** the choice is one of `block|fix|note`
-(`:161-162`). Otherwise `FALLBACK` (`:132`) maps the reviewer's own severity:
+(`:186-187`). Otherwise `FALLBACK` (`:157`) maps the reviewer's own severity:
 `blocker→block`, `should_fix→fix`, `nitpick→note`. `verdict_by` records which
-(`system1` or `fallback:<reason>`).
+(`system1` or `fallback:<reason>`). **0.4.6:** `v.get("state")` (`:193-194`) is
+also kept, as `f["tier1_state"]`, whatever `ok` was — the input to the question
+that was actually asked, for `feedback.py export-eval` to use later.
 
-Then a **deterministic clamp** (`:167`): `scope == "pre_existing"` and `block` →
+Then a **deterministic clamp** (`:197`): `scope == "pre_existing"` and `block` →
 `note`. A defect this diff did not introduce cannot gate its merge, whatever tier 1
 says.
 
-`--no-verdict` (`:229-236`) applies the same `FALLBACK` and clamp without calling
-tier 1. `test_agent.py` pins this path.
+`--no-verdict` (`:263-269`) applies the same `FALLBACK` and clamp without calling
+tier 1 — so it never sets `tier1_state`, and those findings cannot become
+`export-eval` examples either. `test_agent.py` pins this path.
 
-**0.3.0:** lint findings (`lint_findings_from()`, `:141-147`) bypass both this step
-and system 2 entirely — they already carry a verdict from `LINT_VERDICT` (`:138`)
+**0.3.0:** lint findings (`lint_findings_from()`, `:166-172`) bypass both this step
+and system 2 entirely — they already carry a verdict from `LINT_VERDICT` (`:163`)
 (error→fix, warning/info→note) before they ever reach `main()`'s sort.
 
-### 3g. Exit code — `agent.py:259`
+### 3g. Exit code — `agent.py:293`
 
 ```python
 return 1 if blockers or sensitive else 0
@@ -429,7 +454,7 @@ a human even with zero findings.
 
 ---
 
-## Token accounting — `accounting()` (`agent.py:174`)
+## Token accounting — `accounting()` (`agent.py:204`)
 
 Printed to stderr as JSON. Tier-1 triage totals come from `stats.system1_usage`
 (summed in `review.py`), plus `verdict_calls` and `verdict_tokens` from the

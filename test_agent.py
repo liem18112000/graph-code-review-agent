@@ -71,11 +71,44 @@ def test_review_sends_the_payload_via_stdin_not_argv(monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    asyncio.run(agent.review(big_bundle, cwd=".", timeout=5, cheap="opus"))
+    asyncio.run(agent.review(big_bundle, cwd=".", timeout=5, cheap="opus", full="opus"))
 
     argv_text = " ".join(str(a) for a in seen["argv"])
     assert ".m1999()" not in argv_text          # the bundle never touches argv
     assert b".m1999()" in seen["input"]         # it goes to stdin instead
+
+
+def test_sensitive_and_human_top_get_the_deep_search_agent(monkeypatch):
+    """graph-reviewer has no search tool, by design, for the common case.
+    Sensitive and human+top bundles get graph-reviewer-deep instead (Grep +
+    Glob granted via its own frontmatter, not a CLI flag -- --allowedTools
+    does not widen an agent's declared tools, verified live before building
+    this). Never the model flag's job to decide this; dispatch is by route
+    and sensitivity alone."""
+    class FakeProc:
+        returncode = 0
+        async def communicate(self, input=None):
+            return (json.dumps({"result": "[]", "usage": {}, "modelUsage": {}}).encode(), b"")
+        def kill(self):
+            pass
+
+    seen_agents = []
+
+    async def fake_exec(*args, **kwargs):
+        seen_agents.append(args[args.index("--agent") + 1])
+        return FakeProc()
+
+    import asyncio as _asyncio
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
+
+    cases = [({"route": "human+top", "sensitive": False}, agent.AGENT_DEEP),
+            ({"route": "full", "sensitive": True}, agent.AGENT_DEEP),
+            ({"route": "full", "sensitive": False}, agent.AGENT),
+            ({"route": "light", "sensitive": False}, agent.AGENT)]
+    for extra, expected in cases:
+        bundle = {"id": "b0", "package": "p", "facts": {}, "hunks": [], **extra}
+        asyncio.run(agent.review(bundle, cwd=".", timeout=5, cheap="opus", full="opus"))
+        assert seen_agents[-1] == expected, (extra, seen_agents[-1])
 
 
 if __name__ == "__main__":
@@ -86,4 +119,5 @@ if __name__ == "__main__":
     test_adjudicate_rejects_unexpected_choice(_MP())
     test_hints_for_never_leaks_route_or_confidence_threshold()
     test_review_sends_the_payload_via_stdin_not_argv(_MP())
+    test_sensitive_and_human_top_get_the_deep_search_agent(_MP())
     print("ok")

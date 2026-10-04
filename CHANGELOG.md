@@ -1,5 +1,95 @@
 # Changelog
 
+## 0.4.6
+
+Three follow-ups from the "what else can we improve" discussion.
+
+### Added — search tool for sensitive/`human+top` bundles
+
+`graph-reviewer` has no search tool, by design — it's what kills the
+redundant-grep cost the whole architecture exists to avoid. But three real
+comparisons against `/code-review` all showed it missing cross-file
+consequences as a result: an exposed admin route documented only in an
+nginx config, a shell script's health check gating the whole bootstrap.
+
+Added `agents/graph-reviewer-deep.md`, a *separate* agent definition with
+`tools: Read, Grep, Glob`, dispatched only for sensitive or `human+top`
+bundles — the tier already paying the expensive-reviewer cost, so the
+extra search cost is not new waste. Verified live, twice: (1)
+`--allowedTools` does **not** widen an agent's own declared tool grant —
+only a separate agent definition does, so that's what this is; (2) a
+synthetic "config value changed" bundle correctly triggered real `Grep`
+calls against this repo's own docs and found four genuine, specifically-
+grounded cross-file inconsistencies.
+
+### Added — `merge_findings.py`, a formal "run both" mode
+
+All three comparisons independently concluded "running both finds more" —
+near-zero overlap, complementary blind spots. `merge_findings.py` matches
+two findings lists (same file, suffix-wise, within a line tolerance) into
+found-by-both / only-each, reusing the same matching idea `bench.py`'s
+scorer already used for ground truth. The skill (`graph-review/SKILL.md`
+§5) now documents this as an optional, offered-not-automatic step, since
+it roughly doubles review cost.
+
+### Added — the honest half of "fine-tune Laya on PR history"
+
+Checked what the installed `laya` package actually supports: no weight
+training entry point at all. `laya.calibrate` exists but needs raw logits
+our HTTP integration never receives, and its per-bucket floor (2000
+examples) is far more than any near-term feedback log will hold.
+`laya-evals` is real and usable, though — it evaluates a checkpoint
+against a labelled `{state, questions, expected}` dataset.
+
+`system1.verdict()` now returns the exact `state` it asked tier 1 about;
+`agent.py` threads it onto each finding as `tier1_state`. `feedback.py
+export-eval` turns labelled rows (human-accepted verdicts, or dismissals
+with an explicit `--expected` correction) into that dataset — verified
+against the real `laya-evals validate` command, not just shaped to look
+right. This is the measurement half of "fine-tune on PR history"; the
+training half isn't buildable with what the installed package exposes.
+
+### Fixed — a documentation citation to nothing
+
+Several recent changelog/doc entries cited "docs/architecture.md §10" for
+the three real comparisons without that section actually containing them.
+Added §10.2, summarising what repeated across all three runs rather than
+quoting exact figures from any one (they varied run to run).
+
+## 0.4.5
+
+### Fixed — the `full` route was hardcoded to `opus`, with no way to change it
+
+Every measured comparison (§10) showed graph review costing 2–3x
+`/code-review` running on Sonnet. Most of that gap was this: `route()`'s
+`full` tier — where most bundles actually land while tier-1 confidence is
+low — had no flag at all, unconditionally `"opus"`. Only `light` had a
+flag (`--cheap-model`), and `light` is rarely reached (needs confidence
+≥ 0.95).
+
+Added `--model` for the `full` tier. `human+top` stays pinned to `opus`
+always, matching the documented route table — it's the highest-risk tier
+and needs a human regardless, so quality there was never meant to be a
+cost trade-off. Both flags default to `opus`, so behaviour is unchanged
+unless set.
+
+Also corrected a stale assumption this hid behind: a comment claimed "this
+account cannot reach sonnet." Verified today, `sonnet` resolves correctly
+(`claude-sonnet-5-5`) via `claude -p --model sonnet` — that claim no
+longer holds, if it ever did on this account. The real reason the tiering
+levers look inert is simpler: Laya's routing confidence rarely clears the
+thresholds, and `full` never had a flag to tier in the first place.
+
+### Fixed — token accounting could report the wrong model
+
+`accounting()` picked a bundle's model via `next(iter(modelUsage))` — the
+first key in Claude Code's response. `modelUsage` often carries more than
+one entry (an incidental cheaper-model call alongside the real review),
+and the first key is not reliably the reviewer. Measured live: a bundle
+actually reviewed by Sonnet was reported as `claude-haiku-4-5-20251001`.
+Now picks the entry with the most output tokens — the one that did the
+actual reviewing work.
+
 ## 0.4.4
 
 ### Validated — the 0.4.3 confidence fix works in production

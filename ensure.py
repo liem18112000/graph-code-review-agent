@@ -104,16 +104,24 @@ def check_modules():
 
 
 def check_agent():
-    """The reviewer prompt may come from the plugin or from ~/.claude/agents."""
+    """The reviewer prompts may come from the plugin or from ~/.claude/agents.
+    Both graph-reviewer (the common case) and graph-reviewer-deep (sensitive /
+    human+top bundles, granted search -- 0.4.6) must be present; agent.py
+    dispatches to whichever one it picked per bundle with no fallback."""
     here = os.path.dirname(os.path.abspath(__file__))
-    local = os.path.join(here, "agents", "graph-reviewer.md")
-    user = os.path.join(os.path.expanduser("~"), ".claude", "agents",
-                        "graph-reviewer.md")
-    for path, where in ((local, "plugin"), (user, "user-level")):
-        if os.path.isfile(path):
-            return add("graph-reviewer agent", REQ, OK, "found (%s)" % where)
-    return add("graph-reviewer agent", REQ, FAIL, "not found",
+    ok = True
+    for name in ("graph-reviewer.md", "graph-reviewer-deep.md"):
+        local = os.path.join(here, "agents", name)
+        user = os.path.join(os.path.expanduser("~"), ".claude", "agents", name)
+        found = next((w for p, w in ((local, "plugin"), (user, "user-level"))
+                     if os.path.isfile(p)), None)
+        if not found:
+            add(name, REQ, FAIL, "not found",
                "claude plugin install graph-code-review-agent")
+            ok = False
+        else:
+            add(name, REQ, OK, "found (%s)" % found)
+    return OK if ok else FAIL
 
 
 def check_key():

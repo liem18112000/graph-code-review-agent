@@ -170,9 +170,12 @@ def verdict(f: dict, sensitive: bool = False) -> dict:
     try:
         raw = ask(_no_source(rec), VERDICT_Q)
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "usage": {}}
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "usage": {}, "state": rec}
     a = (raw.get("answers") or {}).get(Q_VERDICT) or {}
-    return {"ok": True, "verdict": a.get("choice"),
+    # `state` rides along so a human correction can later become a labelled
+    # laya-evals example (feedback.py export-eval) -- without it, a dataset
+    # entry would have no `state` to replay the question against.
+    return {"ok": True, "verdict": a.get("choice"), "state": rec,
             "confidence": _confidence(a), "usage": raw.get("usage") or {}}
 
 

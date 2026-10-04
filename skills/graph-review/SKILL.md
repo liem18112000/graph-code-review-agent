@@ -86,12 +86,14 @@ not exploration; the no-search rule holds because the agent has no search tool.
 
 | `route` | Model | Also |
 |---|---|---|
-| `human+top` | top tier | **flag for required human review** |
-| `full` | top tier | |
-| `light` | `--cheap-model` | off unless the account can reach a cheaper model |
+| `human+top` | top tier, always | **flag for required human review** |
+| `full` | `--model` (default top tier) | most bundles land here while tier-1 confidence is low |
+| `light` | `--cheap-model` (default top tier) | needs confidence ≥ 0.95, rarely reached |
 
-`agent.py` warns on stderr when bundles route `light` but no cheap model is
-configured — that means the tiering lever did not fire and they ran at full cost.
+Both model flags default to the top tier, so cost tiering is **off unless you
+set them** — not because the account can't reach a cheaper model; that was a
+stale assumption from an earlier account's plan tier. `agent.py` warns on
+stderr when bundles route `light` but no cheap model is configured.
 
 Bundles with `in_graph: false` still get reviewed — absence from the graph is not
 evidence of safety.
@@ -119,6 +121,39 @@ Findings arrive sorted: introduced before pre-existing, then by severity. Report
 
 Any token figure you quote for the *current* session is a lower bound — the turn
 that counts the tokens has not been billed yet when it counts them.
+
+## 5. Optional — cross-check with `/code-review`
+
+**0.4.6.** Three independent real comparisons (docs/architecture.md §10) all
+found the same thing: this pipeline and `/code-review` have near-zero finding
+overlap and complementary blind spots (this one is strong on data/seed
+semantics and flags sensitive paths for human review; `/code-review` traces
+real code paths and catches cross-file config issues this pipeline's own
+reviewer sometimes missed before `graph-reviewer-deep` existed). **Running
+both finds more than either alone.** Offer this step; do not run it
+unprompted — it roughly doubles the cost of the review.
+
+If the user agrees:
+
+```bash
+/code-review high
+```
+
+Ask `/code-review` to also emit its findings as `{"findings": [{"file",
+"line", "summary", ...}]}` — the same shape `agent.py` already produces — to
+a file, then:
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/merge_findings.py" \
+    --a /tmp/findings.json --a-label graph \
+    --b /tmp/code_review.json --b-label code-review \
+    --tolerance 5
+```
+
+Report the three groups separately: found by both (highest confidence — two
+independent methods agree), only graph review, only `/code-review`. Do not
+discard either side's unique findings; the whole point of running both is
+that each one's blind spot is the other's coverage.
 
 ## Rules
 

@@ -35,7 +35,7 @@ flowchart LR
 |---|---|---|
 | **Architecture** | N dimension agents, each over the full diff, then 3–5 skeptics per finding | Free filters → classifier → one reviewer per package *bundle* → classifier verdict |
 | **Finding callers/tests** | Every agent greps and reads, serially, at LLM price | Resolved once from a prebuilt graph; injected as facts, reviewer has no search tool |
-| **Model spend** | Top model everywhere | Trivial hunks never reach a model; per-route model tiering is built but **off** until `--cheap-model` is set |
+| **Model spend** | Top model everywhere | Trivial hunks never reach a model; per-route model tiering (`--model` for `full`, `--cheap-model` for `light`) is **off by default**, both flags default to `opus` |
 | **Verification** | Every finding re-litigated by 3–5 skeptics | None; one cheap classifier call per finding assigns the verdict |
 | **Merge gate** | Depends on the model's wording that run | Fixed-shape record → reproducible `block\|fix\|note` |
 | **Setup** | None | graphify + git hook; tier 1 needs no key by default (self-hosted), only if you opt into a hosted vendor |
@@ -252,18 +252,20 @@ only require a key when `SYSTEM1_URL` points at the hosted vendor.
 
 ```
 .claude-plugin/     plugin + marketplace manifests
-agents/             graph-reviewer.md — the reviewer prompt and tool grant
+agents/             graph-reviewer.md (common case) + graph-reviewer-deep.md (sensitive/human+top, has search)
 skills/             graph-review — the interactive orchestrator
 review.py           diff -> hunks -> graph facts -> ranked bundles
 system1.py          tier-1 client (the swappable slot)
-agent.py            headless driver: one `claude -p` per bundle
+agent.py            headless driver: one `claude -p` per bundle, --model / --cheap-model
 diffparse.py        unified-diff parsing
 rank_queue.py       rank several branches/PRs by aggregate risk (no graphify flag needed)
 mcp_server.py       stdio MCP server exposing review_diff / rank_queue to other tools
-feedback.py         log + summarise human accept/dismiss per finding
+merge_findings.py   merge graph review + /code-review findings: both / only-each
+feedback.py         log + summarise human accept/dismiss; export-eval for laya-evals
 ensure.py           preflight check (.sh / .ps1 shims find Python first)
-test_agent.py       self-check: merge-gate fallback, hints_for()
+test_agent.py       self-check: merge-gate fallback, hints_for(), dispatch
 test_review.py      self-check: graph freshness, path-to-sensitive, linter wiring
+test_system1.py     self-check: answer_confidence vs confidence fallback
 bench.py            A/B replay harness for measuring against a baseline (+ `selftest`)
 overrides.toml      tier-0 globs: sensitive / skip / tests, optional [[linters]]
 docs/               architecture.md (why), call-flow.md (what calls what), benchmark.md
@@ -302,8 +304,14 @@ cannot be flattered by its own failure.
 
 Working and measured end to end. Known gaps, stated plainly:
 
-- **The cheap-model tier is built but unexercised.** No bundle in testing has yet
-  cleared the confidence floor for the `light` route.
+- **The `light`-route cheap-model tier is built but unexercised.** No bundle in
+  testing has yet cleared the confidence floor for that route (Laya's default
+  confidence rarely clears 0.70, let alone the 0.95 `light` needs). **The
+  `full`-route model is a flag now, not a hardcode** (`--model`, 0.4.5) — set it
+  to `sonnet` to cut cost on the route most bundles actually land on; three
+  measured comparisons (docs/architecture.md §10) all showed graph review
+  costing 2–3x `/code-review` running on Sonnet, substantially because this
+  flag didn't exist yet.
 - **The benchmark runs, but the metric does not discriminate.** An A/B over 5
   real fix commits (arm A: same model, no graph facts, free to search; arm B:
   the full pipeline) scored **1.00 localization for both arms** at the default
