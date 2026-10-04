@@ -614,7 +614,12 @@ The body does five things:
 4. **Sets rules.** Report everything including uncertain findings (a later step
    ranks and filters); ground every finding in the diff or a fact; no style
    comments; state a concrete failure; set `scope` to `introduced` or
-   `pre_existing`, defaulting to `introduced` when unsure.
+   `pre_existing`, defaulting to `introduced` when unsure. **0.4.4:** a claim
+   about what a specific unread caller passes or does is capped at
+   `should_fix`, never `blocker` — `callers: <n>` is a call-graph fact, not a
+   fact about arguments, and a real run's false-positive `block` asserted an
+   unread caller still used an old call shape it had actually already been
+   updated past.
 5. **Fixes the output shape**, a bare JSON array:
 
 ```json

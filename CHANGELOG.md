@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.4
+
+### Validated — the 0.4.3 confidence fix works in production
+
+A rerun of the same comparison that originally caught the 0.4.3 bug: Laya
+went from deciding 0 of 54 verdicts to 4 of 47. The fix holds.
+
+### Fixed — a false-positive `blocker` from a claim about an unread caller
+
+The one verdict Laya did decide with the new fix was a `block`, and it was
+wrong: the finding claimed a caller still used an old one-argument call
+form; the caller actually passed the new, correct two-argument form. The
+reviewer has `Read` but no search tool, and the caller wasn't in the
+bundle it saw — so it guessed from the signature's diff alone rather than
+reading the caller or hedging. `callers: <n>` is a call-graph fact (an
+edge exists); it was never a fact about what arguments a caller passes.
+
+`agents/graph-reviewer.md` gained a rule: a claim about what a specific
+unread caller passes or does is capped at `should_fix`, never `blocker`,
+and must be phrased as a hypothesis with lowered confidence. This reduces,
+but — per the system's own measured-limit honesty elsewhere — does not
+guarantee eliminating this class of false positive, since tier 1's
+verdict is still an independent judgement from the record, not a strict
+function of the reviewer's stated severity.
+
 ## 0.4.3
 
 ### Fixed — tier 1 was gating on the wrong confidence field

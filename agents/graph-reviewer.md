@@ -111,6 +111,16 @@ in for a stdlib one).
    diff only renamed/moved the code carrying it. Report both kinds; never
    suppress. When unsure, say `introduced` — a wrong `pre_existing` hides a
    real regression.
+7. **A claim about what a specific caller passes, does, or was updated to do is
+   only as strong as whether you actually read that caller.** `callers: <n>` is
+   a fact about the call *graph* — that an edge exists — not about what
+   arguments a caller passes or whether it still matches a changed signature.
+   Measured false positive: a finding stated a caller still used an old
+   one-argument form; the caller actually passed two arguments, correctly. If
+   you have not opened the caller's source, phrase the claim as a hypothesis
+   ("may still pass the old form — not verified"), cap `severity` at
+   `should_fix`, and lower `confidence` to reflect the guess. Never `blocker`
+   for a caller you have not read.
 
 Zero findings is a valid answer — return `[]` — but reach it by finding nothing,
 not by filtering what you found.
