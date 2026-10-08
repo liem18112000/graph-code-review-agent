@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""bundles.json -> findings.json. Exits 1 on blockers.
+"""bundles.json -> findings.json. Exits 1 on blockers, sensitive bundles, or
+any bundle that failed to review.
 
     python agent.py --bundles bundles.json > findings.json
 
@@ -69,12 +70,24 @@ def findings_from(stdout: str) -> list[dict]:
 
     --output-format json wraps the reply; the reply itself is the JSON array the
     agent definition asks for, sometimes inside a code fence.
+
+    Raises when there is no such array: the contract says zero findings is
+    an explicit `[]`, so a reply without one is a failed review, not a clean
+    one. Decodes from each `[` in turn rather than one greedy regex, so a
+    bracket in surrounding prose ("bundle [b001]") cannot sink the parse.
     """
     text = json.loads(stdout).get("result", "")
     if not isinstance(text, str):
-        return []
-    m = re.search(r"\[.*\]", text, re.S)          # tolerate prose or a fence
-    return json.loads(m.group(0)) if m else []
+        raise ValueError("reply has no text result")
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\[", text):
+        try:
+            val, _ = dec.raw_decode(text, m.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(val, list) and all(isinstance(f, dict) for f in val):
+            return val
+    raise ValueError(f"no findings array in reply: {text[:120]!r}")
 
 
 async def review(bundle: dict, cwd: Path, timeout: int, cheap: str, full: str) -> list[dict]:
@@ -136,13 +149,14 @@ async def run(bundles: list[dict], cwd: Path, concurrency: int,
     async def one(b):
         async with sem:
             try:
-                return await review(b, cwd, timeout, cheap, full)
-            except Exception as e:                # one bundle must not sink the run
+                return (*await review(b, cwd, timeout, cheap, full), None)
+            except Exception as e:                # one bundle must not sink the run...
                 print(f"{b['id']}: {type(e).__name__}: {e}", file=sys.stderr)
-                return [], {}
+                return [], {}, b["id"]            # ...but it must not pass the gate either
 
-    pairs = await asyncio.gather(*map(one, bundles))
-    return ([f for g, _ in pairs for f in g], [u for _, u in pairs if u])
+    res = await asyncio.gather(*map(one, bundles))
+    return ([f for g, _, _ in res for f in g], [u for _, u, _ in res if u],
+            [bid for _, _, bid in res if bid])
 
 
 # Reviewer severity -> verdict, used only when tier 1 is down or hedging.
@@ -251,8 +265,8 @@ def main() -> int:
     doc = json.loads(sys.stdin.read() if a.bundles == "-"
                      else Path(a.bundles).read_text("utf-8"))
     bundles = doc["bundles"]
-    findings, usage = asyncio.run(run(bundles, a.repo, a.concurrency,
-                                      a.timeout, a.cheap_model, a.model))
+    findings, usage, failed = asyncio.run(run(bundles, a.repo, a.concurrency,
+                                              a.timeout, a.cheap_model, a.model))
 
     rank = {"blocker": 0, "should_fix": 1, "nitpick": 2}
     # pre-existing defects are real but the author of this diff cannot act on
@@ -273,7 +287,7 @@ def main() -> int:
     # lint findings are deterministic and already carry a verdict -- prepend
     # them, don't run them back through sort/adjudicate's reviewer-severity logic
     findings = lint_findings_from(doc) + findings
-    json.dump({"findings": findings}, sys.stdout, indent=2)
+    json.dump({"findings": findings, "failed_bundles": failed}, sys.stdout, indent=2)
     print()
 
     acct = accounting(doc["stats"], usage, v_usage)
@@ -290,7 +304,10 @@ def main() -> int:
     print(f"{len(findings)} findings ({len(findings)-len(new)} pre-existing), "
           f"{blockers} block, {sensitive} sensitive bundle(s) need a human",
           file=sys.stderr)
-    return 1 if blockers or sensitive else 0      # non-zero fails CI
+    if failed:
+        print(f"{len(failed)} bundle(s) NOT reviewed ({', '.join(failed)}) -- a partial "
+              "review cannot pass the gate", file=sys.stderr)
+    return 1 if blockers or sensitive or failed else 0      # non-zero fails CI
 
 
 if __name__ == "__main__":
