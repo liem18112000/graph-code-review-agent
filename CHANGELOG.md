@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+Three silent-recall fixes, each with a reproducing test in `test_repro.py`.
+
+### Fixed — `**/x` globs never matched a file at the repo root
+
+`fnmatch` translates `**/package-lock.json` to a pattern that requires a
+slash, so a root-level lockfile or README was never skipped, and a root-level
+`auth/`, `migrations/` or `schema.sql` was never marked sensitive. `hit()` now
+also tries each glob with `**/` matching zero directories. It also uses
+`fnmatchcase`: `fnmatch` case-folds on Windows only, so `src/author/Book.java`
+matched `**/*Auth*.java` on a Windows box but not in Linux CI.
+
+### Fixed — a bundle that failed to review no longer passes the gate
+
+**Behaviour change.** A timed-out, errored or unparseable bundle used to be
+logged to stderr and dropped, so a run where every bundle failed (e.g. expired
+Claude auth) reported 0 findings and exited 0. `agent.py` now lists such
+bundles under `failed_bundles` and exits 1. `findings_from()` raises on a reply
+with no findings array (the agent contract says zero findings is an explicit
+`[]`), and decodes from each `[` instead of one greedy regex, so a bracket in
+surrounding prose no longer loses the whole bundle.
+
+### Fixed — indentation changes in Python / YAML dropped as whitespace-only
+
+`is_whitespace_only` collapsed leading whitespace, so dedenting a statement
+out of an `if` block was resolved for free and never reviewed. Leading
+whitespace is now kept verbatim for `.py/.pyi/.pyx/.yaml/.yml/.mk/Makefile`;
+other languages are unchanged.
+
 ## 0.4.6
 
 Three follow-ups from the "what else can we improve" discussion.

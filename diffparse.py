@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$")
+# Leading whitespace is syntax here: a dedent moves code out of a block.
+INDENT_SIGNIFICANT = (".py", ".pyi", ".pyx", ".yaml", ".yml", ".mk", "Makefile")
 
 
 def norm(p: str) -> str:
@@ -41,10 +43,15 @@ class Hunk:
     @property
     def is_whitespace_only(self) -> bool:
         """Collapse whitespace only outside string literals: inside one it is
-        content, and a false positive here is a real change never reviewed."""
+        content, and a false positive here is a real change never reviewed.
+        Indentation is kept verbatim where the language makes it syntax."""
+        sig = self.path.endswith(INDENT_SIGNIFICANT)
+
         def k(l: str) -> str:
             b = l[1:]
-            return b.strip() if ('"' in b or "'" in b) else re.sub(r"\s+", " ", b).strip()
+            lead = b[:len(b) - len(b.lstrip())] if sig else ""
+            return lead + (b.strip() if ('"' in b or "'" in b)
+                           else re.sub(r"\s+", " ", b).strip())
         a = [k(l) for l in self.body if l.startswith("+")]
         r = [k(l) for l in self.body if l.startswith("-")]
         return bool(a or r) and a == r

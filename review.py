@@ -81,7 +81,12 @@ def run_linters(repo: Path | None, paths: set[str], linters: list[dict],
 
 
 def hit(path: str, globs: list[str]) -> bool:
-    return any(fnmatch.fnmatch(path, g) for g in globs)
+    # fnmatch's `**/` demands a slash, so a bare `**/x` never matches x at the
+    # repo root (package-lock.json, auth/, schema.sql) -- also try it as zero
+    # directories. fnmatchcase, not fnmatch: fnmatch case-folds on Windows
+    # only, so the same diff would gate differently on a dev box and in CI.
+    return any(fnmatch.fnmatchcase(path, p)
+               for g in globs for p in (g, g.replace("**/", "")))
 
 
 def graph_freshness(raw: dict, repo: Path | None) -> dict:
